@@ -20,7 +20,7 @@ How the founder or a tester runs the B01 feasibility spike on macOS 26 and decid
 | --- | --- |
 | Apple Silicon Mac or VM on macOS 26.x, SIP enabled | `scripts/validate-env.sh --role test` checks this |
 | Xcode 26 or the Command Line Tools | Needed for `swift` (fixture-check, spoof client) and `python3` |
-| A **team-signed** DriveApp DMG or app | Developer ID and notarised for a clean machine. An unsigned (ad-hoc) build can rehearse the procedure, but it fails G0-SIGN and G0-IPC-AUTH by design. |
+| A **team-signed** DriveApp DMG or app | Developer ID and notarised for a clean machine. The signed CI build needs the FSKit module's Developer ID provisioning profile (`MACOS_PROFILE_FSEXT_BASE64`, [12 Pipeline usage §2](12-pipeline-usage.md#2-add-the-secrets-all-optional)). An unsigned (ad-hoc) build can rehearse the procedure, but it fails G0-SIGN and G0-IPC-AUTH by design, and its FSKit module cannot load (restricted entitlement without a profile). |
 | This repo, checked out at the build's commit | Scripts and `Packages/StorageCore` (fixture-check) |
 | About 15 minutes | Most of it is the service-restart loop (about 2 minutes) and the manual approvals |
 
@@ -97,4 +97,4 @@ Assumptions the first macOS 26 run must confirm. Correct the script or this runb
 7. The sandboxed extension can look up `<TEAM>.<APP_BUNDLE_ID>.storage` because of the app-group prefix (ADR03 fact 4).
 8. The listener-level code-signing requirement rejects the spoof before `shouldAcceptNewConnection` runs, so no rejection line from the service is expected. Check `com.apple.xpc` logs. The spoof selector `send:withReply:` must match `Shared/StorageServiceXPC.swift`.
 9. `launchctl kickstart -k gui/$UID/<label>` works on an SMAppService-registered agent. Neither the kernel nor FSKit imposes its own timeout that differs from the 30 s service deadline.
-10. Whether the FSKit entitlement and app group need a provisioning profile under Developer ID.
+10. Provisioning profiles under Developer ID. From Apple's docs: the FSKit entitlement is restricted, so the `.appex` needs a Developer ID profile ([TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles); FSKit Module is listed for Developer ID in the [macOS capability table](https://developer.apple.com/help/account/reference/supported-capabilities-macos)). The team-prefixed App Group is unrestricted on macOS, so the app and the StorageService tool should need none. Confirm: the signed `.appex` contains `Contents/embedded.provisionprofile`; AMFI accepts the App Group entitlement on the profile-less tool and app; Xcode does not report that the FSKit profile lacks `com.apple.security.application-groups`.

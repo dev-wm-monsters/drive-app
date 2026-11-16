@@ -11,9 +11,8 @@
 # Docs: https://developer.apple.com/documentation/servicemanagement/smappservice/agent(plistname:)
 #       https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos
 #       (BundleProgram is relative to the app bundle; AssociatedBundleIdentifiers names the app.)
-# G0-VERIFY: with ENABLE_USER_SCRIPT_SANDBOXING=YES, Xcode must allow creating the
-# Library/LaunchAgents directory for the declared output. If the sandbox denies the mkdir, set
-# ENABLE_USER_SCRIPT_SANDBOXING=NO on the DriveApp target only.
+# User-script sandboxing is off for the DriveApp target only (project.yml), so this script can
+# create Contents/Library/LaunchAgents. It reads only build-setting environment variables.
 set -eu
 
 : "${APP_BUNDLE_ID:?APP_BUNDLE_ID is not set}"

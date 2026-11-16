@@ -30,11 +30,11 @@ settings:
     CODE_SIGN_IDENTITY: "-"
     DEAD_CODE_STRIPPING: "YES"
     ENABLE_USER_SCRIPT_SANDBOXING: "YES"
-    # Developer ID provisioning profiles (UUID or name), empty = none. Set on the
-    # xcodebuild command line by scripts/build-dmg.sh for signed builds only, and
-    # mapped to PROVISIONING_PROFILE_SPECIFIER per target below. A command-line
-    # PROVISIONING_PROFILE_SPECIFIER would also hit the StorageService tool, which
-    # cannot carry a profile, hence the indirection.
+    # Developer ID provisioning profiles (UUID or name); empty = none.
+    # scripts/build-dmg.sh sets them on the xcodebuild command line for
+    # signed builds; targets map them to PROVISIONING_PROFILE_SPECIFIER below.
+    # A global PROVISIONING_PROFILE_SPECIFIER would also reach the
+    # StorageService tool, which cannot carry a profile.
     DRIVEAPP_APP_PROFILE: ""
     DRIVEAPP_FS_PROFILE: ""
 

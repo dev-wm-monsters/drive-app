@@ -21,6 +21,8 @@ This narrower beta establishes the storage engine before Finder writes, addition
 | 07 Setup and costs | Hardware, accounts, tools and spending categories |
 | 08 Sources and decisions | Evidence, assumptions and unresolved questions |
 | 11 DMG pipeline brief | Current task: GitHub Actions pipeline that builds a DMG (do not run) |
+| 12 Pipeline usage | Secrets, running Build DMG, where the DMG appears |
+| 13 B01 G0 runbook | macOS 26 test procedure, evidence and G0 decision table |
 | 10 Repo, CI and test builds | GitHub setup, building DMGs on macOS runners, where to test (macOS 26), multiple GitHub accounts |
 
 ## Read and implement in this order

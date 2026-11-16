@@ -58,8 +58,8 @@ jobs:
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Developer ID provisioning profiles (base64 .provisionprofile). The
-          # FSKit module's profile is required when signing; the app's is optional.
+          # Developer ID provisioning profiles (base64 .provisionprofile).
+          # FSKit module: required when signing. App: optional.
           MACOS_PROFILE_FSEXT_BASE64: ${{ secrets.MACOS_PROFILE_FSEXT_BASE64 }}
           MACOS_PROFILE_APP_BASE64: ${{ secrets.MACOS_PROFILE_APP_BASE64 }}
           # Optional notarisation (App Store Connect API key).
