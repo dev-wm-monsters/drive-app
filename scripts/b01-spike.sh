@@ -23,8 +23,11 @@
 # Environment (all optional):
 #   SPIKE_HOME          work dir (default ~/DriveAppSpike; temp dir off macOS)
 #   SPIKE_MOUNTPOINT    default $SPIKE_HOME/mnt (must stay under $SPIKE_HOME)
-#   SPIKE_RESOURCE      mount resource; "ramdisk" (default) attaches a 1 MiB RAM disk
-#                       and passes its diskN name. G0-VERIFY the resource kind.
+#   SPIKE_RESOURCE      mount resource (default driveappspike://spike, the FSGenericURLResource
+#                       the DriveAppFS module declares); "ramdisk" attaches a 1 MiB RAM disk and
+#                       passes its diskN name instead. G0-VERIFY the resource kind.
+#   SPIKE_MOUNT_OPTS    extra mount(8) options, e.g. "-o rdonly" (default none, so write
+#                       attempts reach the extension and G0-READONLY tests its errors)
 #   SPIKE_FS_NAME       FSKit short name (default driveappspike)
 #   SPIKE_MOUNT_SUDO=1  prefix mount/umount with sudo (only if G0 shows it is required)
 #   SPIKE_BUILD         override BUILD id;  SPIKE_EVIDENCE_ROOT  default <repo>/validation
@@ -54,7 +57,8 @@ LINUX_REASON="Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavail
 ALL_TESTS="G0-ENV G0-SIGN G0-EXT-ACTIVATE G0-MOUNT G0-LIST G0-READ-RANGE G0-EOF G0-CANCEL G0-READONLY G0-IPC-AUTH G0-SERVICE-RESTART G0-UNMOUNT"
 
 FS_SHORT_NAME="${SPIKE_FS_NAME:-driveappspike}"
-SPIKE_RESOURCE="${SPIKE_RESOURCE:-ramdisk}"
+SPIKE_RESOURCE="${SPIKE_RESOURCE:-driveappspike://spike}"
+MOUNT_OPTS="${SPIKE_MOUNT_OPTS:-}"
 RANDOM_READS="${SPIKE_RANDOM_READS:-500}"
 SEED="${SPIKE_SEED:-1}"
 RESTART_SECONDS="${SPIKE_RESTART_SECONDS:-300}"
@@ -197,6 +201,7 @@ init_build() {
       if [ -n "$cand" ] && [ -d "$cand" ]; then set_app "$cand"; break; fi
     done
   fi
+  if [ -z "$BUILD_ID" ] && [ "$IS_MAC" = 0 ]; then BUILD_ID="linux-cloud-session"; fi
   [ -n "$BUILD_ID" ] || BUILD_ID="unknown-build"
 }
 
@@ -224,8 +229,8 @@ meta() { # meta TEST_ID field(title|reqs|expected|command|verify)
     G0-MOUNT:title) echo "Read-only test volume mounts" ;;
     G0-MOUNT:reqs) echo '["FR03"]' ;;
     G0-MOUNT:expected) echo "mount -F -t driveappspike <resource> <mountpoint> exits 0 and the mountpoint appears in the mount table within 10 s" ;;
-    G0-MOUNT:command) echo "scripts/b01-spike.sh mount  (mkdir -p ~/DriveAppSpike/mnt; mount -F -t driveappspike \$SPIKE_RESOURCE ~/DriveAppSpike/mnt)" ;;
-    G0-MOUNT:verify) echo '["mount -F -t <shortname> <resource> <mountpoint> syntax for FSKit modules on macOS 26","Resource kind the module accepts (RAM-disk block device vs URL/path resource) and whether sudo is required"]' ;;
+    G0-MOUNT:command) echo "scripts/b01-spike.sh mount  (mkdir -p ~/DriveAppSpike/mnt; mount -F -t driveappspike driveappspike://spike ~/DriveAppSpike/mnt; resource from SPIKE_RESOURCE)" ;;
+    G0-MOUNT:verify) echo '["mount -F -t <shortname> <resource> <mountpoint> syntax for FSKit modules on macOS 26","mount(8) turns driveappspike://spike into an FSGenericURLResource (FSSupportsGenericURLResources/FSSupportedSchemes) and reaches loadResource; whether sudo is required"]' ;;
     G0-LIST:title) echo "Directory listing matches the fixture manifest" ;;
     G0-LIST:reqs) echo '["FR04"]' ;;
     G0-LIST:expected) echo "Recursive listing has exactly the manifest files and directories with matching sizes; Unicode name resolves (NFC/NFD recorded); no extra entries apart from ignored system dot-files" ;;
@@ -253,9 +258,9 @@ meta() { # meta TEST_ID field(title|reqs|expected|command|verify)
     G0-READONLY:verify) echo '[]' ;;
     G0-IPC-AUTH:title) echo "Unauthorised XPC client rejected by StorageService" ;;
     G0-IPC-AUTH:reqs) echo '["NFR05"]' ;;
-    G0-IPC-AUTH:expected) echo "With the Mach service registered and the genuine extension reading correctly, an unsigned swift-interpreter client and an ad-hoc-signed compiled client that send a well-formed status request to <TEAM>.<APP_BUNDLE_ID>.storage get no reply and see the connection invalidated; the service logs the rejection" ;;
+    G0-IPC-AUTH:expected) echo "With the Mach service registered and the genuine extension reading correctly, an unsigned swift-interpreter client and an ad-hoc-signed compiled client that send a well-formed status request (send:withReply:) to <TEAM>.<APP_BUNDLE_ID>.storage get no reply and see the connection invalidated; the service log has no 'Accepted XPC client pid <spoof pid>' line and no 'WITHOUT code-signing checks' fault" ;;
     G0-IPC-AUTH:command) echo "scripts/b01-spike.sh test  (xcrun swift spoof-client.swift <mach-service>; xcrun swiftc + codesign -s - spoof-client; optional ad-hoc re-signed app copy with SPIKE_SPOOF_APP_ARGS)" ;;
-    G0-IPC-AUTH:verify) echo '["Sandboxed FSKit extension can mach-lookup a service named with its app-group prefix (<TEAM>.<APP_BUNDLE_ID>.storage)","Spoof client selector/payload matches the Shared XPC protocol so an accepted peer would get a reply","Service log wording for a rejected peer (grep pattern reject|denied|unauthori|requirement)"]' ;;
+    G0-IPC-AUTH:verify) echo '["Sandboxed FSKit extension can mach-lookup a service named with its app-group prefix (<TEAM>.<APP_BUNDLE_ID>.storage)","Listener-level setConnectionCodeSigningRequirement rejects the spoof before shouldAcceptNewConnection runs (so no service-side reject line is expected; check com.apple.xpc logs)","Spoof selector send:withReply: still matches Shared/StorageServiceXPC.swift"]' ;;
     G0-SERVICE-RESTART:title) echo "Service restart: reads fail clearly, never hang or return wrong bytes, then recover" ;;
     G0-SERVICE-RESTART:reqs) echo '["FR03","NFR06","NFR01"]' ;;
     G0-SERVICE-RESTART:expected) echo "During an uncached read loop: launchctl kickstart -k restarts the service (new pid); a SIGSTOPped service makes reads fail within 30 s (+5 s margin); errors are specific errnos (ENOTCONN/ETIMEDOUT/EIO/ECANCELED...); zero wrong bytes; reads recover within 30 s of restart/resume" ;;
@@ -547,14 +552,14 @@ def cmd_readonly(mount, shell_tsv, manifest, out):
         ("create", lambda: os.close(os.open(j("ro-probe-create.txt"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)),
          lambda: os.unlink(j("ro-probe-create.txt"))),
         ("mkdir", lambda: os.mkdir(j("ro-probe-dir")), lambda: os.rmdir(j("ro-probe-dir"))),
-        ("unlink", lambda: os.unlink(target), None),
-        ("rename", lambda: os.rename(target, j("one-renamed.bin")), lambda: os.rename(j("one-renamed.bin"), target)),
         ("open-append", lambda: os.close(os.open(target, os.O_WRONLY | os.O_APPEND)), None),
         ("open-rdwr", lambda: os.close(os.open(target, os.O_RDWR)), None),
         ("truncate", lambda: os.truncate(target, 0), None),
         ("chmod", lambda: os.chmod(target, 0o777), None),
         ("symlink", lambda: os.symlink("one.bin", j("ro-probe-link")), lambda: os.unlink(j("ro-probe-link"))),
         ("utime", lambda: os.utime(target, None), None),
+        ("rename", lambda: os.rename(target, j("one-renamed.bin")), lambda: os.rename(j("one-renamed.bin"), target)),
+        ("unlink", lambda: os.unlink(target), None),
     ]
     probes, ok, eperm = [], True, False
     for name, fn, undo in ops:
@@ -1109,8 +1114,9 @@ cmd_mount() {
     resource="${dev#/dev/}"
   fi
   sp="$(sudo_prefix)"
-  say "running: ${sp:+$sp }mount -F -t $FS_SHORT_NAME $resource $MOUNTPOINT   (G0-VERIFY syntax)"
-  out="$(${sp:+$sp} mount -F -t "$FS_SHORT_NAME" "$resource" "$MOUNTPOINT" 2>&1)" || rc=$?
+  say "running: ${sp:+$sp }mount -F ${MOUNT_OPTS:+$MOUNT_OPTS }-t $FS_SHORT_NAME $resource $MOUNTPOINT   (G0-VERIFY syntax)"
+  # shellcheck disable=SC2086  # MOUNT_OPTS is a word list on purpose
+  out="$(${sp:+$sp} mount -F $MOUNT_OPTS -t "$FS_SHORT_NAME" "$resource" "$MOUNTPOINT" 2>&1)" || rc=$?
   while ! is_mounted && [ "$waited" -lt 10 ]; do sleep 1; waited=$((waited + 1)); done
   mline="$(mount | grep -F " on $MOUNTPOINT (" || true)"
   if [ "$rc" = 0 ] && [ -n "$mline" ]; then st=pass; reason=""
@@ -1253,12 +1259,13 @@ write_spoof_source() {
 // Spoofed client for G0-IPC-AUTH (generated by scripts/b01-spike.sh).
 // Connects to the StorageService Mach service without DriveApp's signature and sends a
 // well-formed IPCRequest.status envelope. Expected: no reply; connection invalidated.
-// G0-VERIFY: the selector below must match the Shared XPC protocol so that an accepted
-// peer WOULD get a reply.
+// The selector send:withReply: mirrors Shared/StorageServiceXPC.swift (StorageServiceXPC), and
+// the service replies to every message it receives, even malformed ones, so an ACCEPTED peer
+// always gets a reply. Keep this in sync if the Shared protocol changes.
 import Foundation
 
 @objc protocol SpoofStorageProtocol {
-    func handle(_ request: Data, reply: @escaping (Data) -> Void)
+    func send(_ request: Data, withReply reply: @escaping (Data) -> Void)
 }
 
 final class Outcome: @unchecked Sendable {
@@ -1290,7 +1297,7 @@ let proxy = connection.remoteObjectProxyWithErrorHandler { error in
     outcome.set("rejected", "\(e.domain) code \(e.code)")
 }
 if let p = proxy as? SpoofStorageProtocol {
-    p.handle(payload) { reply in outcome.set("accepted", "reply of \(reply.count) bytes") }
+    p.send(payload) { reply in outcome.set("accepted", "reply of \(reply.count) bytes") }
 } else {
     outcome.set("error", "proxy does not conform")
 }
@@ -1298,7 +1305,7 @@ let waited = outcome.done.wait(timeout: .now() + .seconds(10))
 let result = outcome.get() ?? ("timeout", "no reply and no invalidation within 10 s")
 connection.invalidate()
 let obj: [String: Any] = ["outcome": result.0, "detail": result.1, "machService": machName,
-                          "timedOut": waited == .timedOut]
+                          "pid": Int(ProcessInfo.processInfo.processIdentifier), "timedOut": waited == .timedOut]
 let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
 print(String(decoding: data, as: UTF8.self))
 exit(result.0 == "accepted" ? 1 : 0)
@@ -1314,7 +1321,7 @@ spoof_json() { # spoof_json VARIANT CMD... -> one JSON object
 }
 
 test_ipc_auth() {
-  local started sp registered=false a b c="null" outcomes genuine=false rejlog st rs t0
+  local started sp registered=false a b c="null" outcomes genuine=false st rs t0 p spoof_pids accepted_lines debug_noauth genuine_accepts
   started="$(now_utc)"
   if [ -z "$MACH_SERVICE" ]; then record_blocked "DriveAppStorageMachService missing from Info.plist" G0-IPC-AUTH; return 0; fi
   sp="$(service_print)"
@@ -1339,21 +1346,33 @@ test_ipc_auth() {
   # Positive control: the genuine extension path still works.
   if [ -s "$WORK/hashes.obs.json" ] && [ "$(py get "$WORK/hashes.obs.json" status)" = pass ]; then genuine=true; fi
   sleep 2
-  rejlog="$(log show --style compact --start "$t0" --predicate "$LOG_PREDICATE AND (eventMessage CONTAINS[c] \"reject\" OR eventMessage CONTAINS[c] \"denied\" OR eventMessage CONTAINS[c] \"unauthori\" OR eventMessage CONTAINS[c] \"requirement\")" 2>/dev/null | grep -vc '^Timestamp' || true)"
+  # Evidence from the service log (StorageService/ServiceDelegate.swift wording):
+  # "Accepted XPC client pid N" for a spoof pid = accepted; "DEBUG BUILD WITHOUT TEAM ID" = no auth.
+  log show --style compact --info --start "$t0" --predicate "$LOG_PREDICATE" 2>/dev/null | redact >"$WORK/ipc-auth-service.log" || true
+  spoof_pids="$(printf '%s %s %s' "$a" "$b" "$c" | grep -o '"pid":[0-9]*' | cut -d: -f2 | tr '\n' ' ')"
+  accepted_lines=0
+  for p in $spoof_pids; do
+    if grep -E "Accepted XPC client pid $p([^0-9]|$)" "$WORK/ipc-auth-service.log" >/dev/null 2>&1; then accepted_lines=$((accepted_lines + 1)); fi
+  done
+  debug_noauth="$(grep -c 'WITHOUT code-signing checks' "$WORK/ipc-auth-service.log" || true)"
+  genuine_accepts="$(grep -c 'Accepted XPC client pid' "$WORK/ipc-auth-service.log" || true)"
   outcomes="$(printf '%s %s %s' "$a" "$b" "$c" | grep -o '"outcome":"[a-z]*"' | cut -d'"' -f4 | tr '\n' ' ')"
   st=pass; rs=""
   case " $outcomes " in
     *" accepted "*) st=fail; rs="a spoofed client got a reply (service accepted an unauthorised peer)" ;;
     *" timeout "*|*" error "*) st=blocked; rs="inconclusive spoof outcome ($outcomes); see spoof-*.err" ;;
   esac
+  if [ "$accepted_lines" -gt 0 ]; then st=fail; rs="${rs:+$rs; }service logged 'Accepted XPC client' for a spoof pid"; fi
+  if [ "${debug_noauth:-0}" -gt 0 ]; then st=fail; rs="${rs:+$rs; }service runs WITHOUT code-signing checks (ad-hoc/no-team build)"; fi
+  if [ "$st" = pass ] && [ "$b" = null ]; then st=blocked; rs="ad-hoc-signed spoof binary could not be built (see spoof-build.log)"; fi
   if [ "$st" = pass ] && [ "$registered" != true ]; then st=blocked; rs="Mach service $MACH_SERVICE not visible in launchctl print; a rejection would be indistinguishable from lookup failure"; fi
   if [ "$st" = pass ] && [ "$genuine" != true ]; then st=blocked; rs="genuine extension path not proven in this run (G0-READ-RANGE cross-check)"; fi
-  if [ "$st" = pass ] && [ "${rejlog:-0}" -lt 1 ]; then st=blocked; rs="clients saw invalidation but the service logged no rejection; confirm the spoof selector matches the Shared protocol (G0-VERIFY)"; fi
   local dir; dir="$(evidence_dir G0-IPC-AUTH)"; mkdir -p "$dir"
   cp "$WORK/spoof-client.swift" "$dir/spoof-client.swift"
+  cp "$WORK/ipc-auth-service.log" "$dir/service-log-during-spoof.txt"
   write_result G0-IPC-AUTH "$st" "$rs" \
-    "{\"machService\":$(json_str "$MACH_SERVICE"),\"serviceRegistered\":$registered,\"genuinePathOk\":$genuine,\"spoofs\":[$a,$b,$c],\"serviceRejectionLogLines\":${rejlog:-0}}" \
-    "$started" "" '["spoof-client.swift"]'
+    "{\"machService\":$(json_str "$MACH_SERVICE"),\"serviceRegistered\":$registered,\"genuinePathOk\":$genuine,\"spoofs\":[$a,$b,$c],\"serviceAcceptedSpoofPids\":$accepted_lines,\"serviceNoAuthWarnings\":${debug_noauth:-0},\"serviceAcceptLinesInWindow\":${genuine_accepts:-0}}" \
+    "$started" "" '["spoof-client.swift","service-log-during-spoof.txt"]'
 }
 
 ev() { printf '{"ev":"%s","t":%s%s}\n' "$1" "$(py now)" "${2:-}" >>"$WORK/restart-events.jsonl"; }
