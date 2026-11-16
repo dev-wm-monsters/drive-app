@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DriveAppStorageService (LaunchAgent) entitlements.
+
+  Not sandboxed, hardened runtime ON (project-wide ENABLE_HARDENED_RUNTIME), no
+  com.apple.security.cs.* exceptions. Why not sandboxed for B01:
+  - launchd starts it from the app bundle via SMAppService; it publishes the Mach service named in
+    its LaunchAgent plist. Keeping the sandbox out of the spike removes one variable from the G0
+    question "is the published Mach service reachable from the sandboxed app and FSKit extension".
+  - B01 reads no user files, Keychain items or network; it serves an in-memory fixture catalog.
+  - Before B02 adds tokens, cache and the database, record an ADR on sandboxing this agent
+    (docs/04-architecture.md: never broaden access merely to bypass a failed setup).
+
+  App Group: the same group as the app and the extension. The Mach service name is prefixed by it,
+  and later builds will share the group container (staging/cache) with the app.
+  G0-VERIFY: a command-line tool cannot embed a provisioning profile; TEAMID-prefixed macOS app
+  groups do not need one, but confirm AMFI accepts this entitlement on the signed tool.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID)</string>
+	</array>
+</dict>
+</plist>

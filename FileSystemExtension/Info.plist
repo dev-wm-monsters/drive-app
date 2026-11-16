@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DriveAppFS (FSKit module) Info.plist.
+
+  Sources for the EXAppExtensionAttributes keys:
+  - https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system
+    (EXAppExtensionAttributes, FSShortName = the `mount -t` type)
+  - https://developer.apple.com/documentation/fskit/fsgenericurlresource (FSSupportedSchemes)
+  - Apple's PassthroughFS sample Info.plist and diskdev_cmds disklib/fskit_support.m, as quoted in
+    https://github.com/mkmik/fs9kit/blob/main/docs/research/fskit-api.md §2.1-§3.1:
+    mount(8) checks FSSupportsBlockResources, FSSupportsPathURLs, FSSupportsGenericURLResources in
+    that order; the first true one decides the resource type. The URL argument is parsed with
+    NSURL URLWithString. FSActivateOptionSyntax is required or mount reports "does not support
+    operation mount".
+  - KhaosT/FSKitSample Info.plist (FSPersonalities shape).
+
+  G0-VERIFY: FSSupportsGenericURLResources and FSSupportedSchemes are documented for macOS 26 only
+  through the FSGenericURLResource page and the diskdev_cmds source; check `mount -F -t driveappspike
+  driveappspike://spike <dir>` reaches loadResource.
+  G0-VERIFY: FSPersonalities is optional for URL resources (Apple's passthrough sample ships an
+  empty dict); this entry only supplies a display name.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>DriveApp Spike File System</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>DriveAppStorageMachService</key>
+	<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID).storage</string>
+	<key>DriveAppTeamID</key>
+	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>DriveAppBaseBundleID</key>
+	<string>$(APP_BUNDLE_ID)</string>
+	<key>EXAppExtensionAttributes</key>
+	<dict>
+		<key>EXExtensionPointIdentifier</key>
+		<string>com.apple.fskit.fsmodule</string>
+		<key>FSShortName</key>
+		<string>driveappspike</string>
+		<key>FSSupportsBlockResources</key>
+		<false/>
+		<key>FSSupportsPathURLs</key>
+		<false/>
+		<key>FSRequiresSecurityScopedPathURLResources</key>
+		<false/>
+		<key>FSSupportsGenericURLResources</key>
+		<true/>
+		<key>FSSupportedSchemes</key>
+		<array>
+			<string>driveappspike</string>
+		</array>
+		<key>FSActivateOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>o:</string>
+		</dict>
+		<key>FSMediaTypes</key>
+		<dict/>
+		<key>FSPersonalities</key>
+		<dict>
+			<key>DriveAppSpike</key>
+			<dict>
+				<key>FSName</key>
+				<string>DriveApp Spike</string>
+				<key>FSfileObjectsAreCaseSensitive</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>
