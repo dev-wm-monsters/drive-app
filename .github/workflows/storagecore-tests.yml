@@ -1,0 +1,49 @@
+# StorageCore tests: builds and tests the pure-Swift package on Linux.
+#
+# Cheap (Ubuntu minutes, no macOS) and scoped to pull requests that touch the
+# package, plus manual dispatch. It never builds the app or a DMG; that is
+# build-dmg.yml (manual only).
+
+name: StorageCore tests
+
+on:
+  pull_request:
+    paths:
+      - "Packages/StorageCore/**"
+      - ".github/workflows/storagecore-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storagecore-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: swift test (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: swift:6.2-noble
+    defaults:
+      run:
+        working-directory: Packages/StorageCore
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build (warnings are errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test --parallel
+
+      - name: Fixture self-check (generate + verify)
+        run: |
+          dir="$(mktemp -d)"
+          swift run -c release fixture-check generate "$dir"
+          swift run -c release fixture-check verify "$dir" --random-reads 200 --seed 1
