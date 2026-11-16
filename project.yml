@@ -1,0 +1,101 @@
+# XcodeGen spec for DriveApp. The .xcodeproj is generated, never committed:
+#   brew install xcodegen && xcodegen generate
+# scripts/build-dmg.sh does this on the CI runner.
+#
+# Identity lives in ONE place: settings.base below (APP_NAME, APP_BUNDLE_ID).
+# Targets derive their names and bundle IDs from it via $(...) substitution.
+# Change the product name / bundle ID here only.
+
+name: DriveApp
+
+options:
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    APP_NAME: DriveApp
+    APP_BUNDLE_ID: com.wakeupmonster.driveapp.dev
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    SWIFT_VERSION: "6.0"
+    ARCHS: arm64
+    ENABLE_HARDENED_RUNTIME: "YES"
+    MARKETING_VERSION: 0.0.1
+    CURRENT_PROJECT_VERSION: 1
+    # Empty = local builds sign ad-hoc ("Sign to Run Locally"). CI injects the
+    # team from the APPLE_TEAM_ID secret for signed builds.
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_IDENTITY: "-"
+    DEAD_CODE_STRIPPING: "YES"
+    ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+
+# --- B01: local Swift package (added by the orchestrator) ------------------
+# packages:
+#   StorageCore:
+#     path: Packages/StorageCore
+
+targets:
+  DriveApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: $(DEVELOPMENT_LANGUAGE)
+        CFBundleDisplayName: $(APP_NAME)
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundlePackageType: $(PRODUCT_BUNDLE_PACKAGE_TYPE)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: true
+        DriveAppStorageMachService: $(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID).storage
+    settings:
+      base:
+        PRODUCT_NAME: $(APP_NAME)
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID)
+        CODE_SIGN_ENTITLEMENTS: App/DriveApp.entitlements
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: App/Info.plist
+        ENABLE_PREVIEWS: "NO"
+    # --- B01: embed the FSKit extension and the storage service ------------
+    # dependencies:
+    #   - target: DriveAppFS               # embedded in Contents/Extensions
+    #   - target: DriveAppStorageService   # copied to Contents/MacOS
+    #   - package: StorageCore
+
+  # --- B01: targets added by the orchestrator ------------------------------
+  # Every non-app target MUST set SKIP_INSTALL: "YES", or `xcodebuild archive`
+  # produces a generic archive and the DMG export fails.
+  #
+  # DriveAppFS:                  # FSKit module, type app-extension
+  #   PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).fsext
+  #   SKIP_INSTALL: "YES"
+  #
+  # DriveAppStorageService:      # CLI tool, LaunchAgent via SMAppService
+  #   PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).storageservice
+  #   SKIP_INSTALL: "YES"
+
+schemes:
+  DriveApp:
+    build:
+      targets:
+        DriveApp: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

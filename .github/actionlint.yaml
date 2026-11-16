@@ -1,0 +1,6 @@
+# actionlint config. actionlint 1.7.7 predates the GitHub-hosted `macos-26`
+# label (listed in https://github.com/actions/runner-images README as the
+# macOS 26 arm64 image), so declare it here to silence [runner-label].
+self-hosted-runner:
+  labels:
+    - macos-26

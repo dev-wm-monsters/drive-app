@@ -1,0 +1,69 @@
+# Build DMG: builds the macOS app on a GitHub-hosted macOS runner, packages it
+# as a DMG and attaches it to a DRAFT PRE-RELEASE.
+#
+# Manual trigger only (Actions > Build DMG > Run workflow). There are no push,
+# pull_request or schedule triggers, to save macOS minutes.
+#
+# All logic lives in scripts/build-dmg.sh; the steps below only call it.
+# How to add the secrets and run it: docs/12-pipeline-usage.md.
+#
+# The DMG is NEVER uploaded with actions/upload-artifact (that counts toward
+# the account's storage quota). It is a GitHub Release asset instead.
+
+name: Build DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.0.1 (MAJOR.MINOR.PATCH[-pre])"
+        required: true
+        type: string
+      build_number:
+        description: "Build number, digits only, e.g. 1"
+        required: true
+        type: string
+
+# Least privilege: only what `gh release create` needs.
+permissions:
+  contents: write
+
+# One build at a time. A queued run waits for the running one to finish.
+concurrency:
+  group: build-dmg-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  build-dmg:
+    name: Build DMG
+    # Pinned image (not macos-latest). macos-26 is the macOS 26 arm64 image with
+    # Xcode 26.x; see docs/12-pipeline-usage.md for the evidence.
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      # Inputs go through env, never interpolated into shell code.
+      VERSION: ${{ inputs.version }}
+      BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build, sign, package, notarise and publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Optional signing (all empty = unsigned, ad-hoc signed DMG).
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Optional notarisation (App Store Connect API key).
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: ./scripts/build-dmg.sh build
+
+      - name: Delete temporary keychain and decoded keys
+        if: always()
+        run: ./scripts/build-dmg.sh cleanup

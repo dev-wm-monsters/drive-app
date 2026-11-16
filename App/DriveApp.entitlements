@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DriveApp (host app) entitlements. Placeholder for the DMG pipeline.
+  App Sandbox on. No hardened-runtime exceptions (com.apple.security.cs.*),
+  so the app passes notarisation as is.
+  B01 adds com.apple.security.application-groups =
+  $(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID) here (see the shared contract).
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+</dict>
+</plist>
