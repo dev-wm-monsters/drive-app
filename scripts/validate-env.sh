@@ -25,13 +25,17 @@ ROLE="all"
 OUT=""
 QUIET=0
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+need_value() { # need_value FLAG ARGC: `shift 2` past the end would exit 1 silently under set -e
+  if [ "$2" -lt 2 ]; then echo "validate-env: $1 needs a value" >&2; usage >&2; exit 64; fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role) ROLE="${2:-}"; shift 2 ;;
+    --role) need_value "$1" $#; ROLE="$2"; shift 2 ;;
     --role=*) ROLE="${1#*=}"; shift ;;
-    --out) OUT="${2:-}"; shift 2 ;;
+    --out) need_value "$1" $#; OUT="$2"; shift 2 ;;
     --out=*) OUT="${1#*=}"; shift ;;
     --quiet) QUIET=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -184,7 +188,7 @@ if [ "$IS_MAC" = 1 ] && [ "$DEVTOOLS" = 1 ]; then
       add_check xcode "Xcode version" "$(required xcode)" fail "Xcode >= $MIN_XCODE" "$xv1 ($xv2) at $DEVDIR" "Select Xcode $MIN_XCODE with xcode-select (owner's action)"
     fi
   else
-    add_check xcode "Xcode version" "$(required xcode)" fail "Xcode >= $MIN_XCODE" "xcodebuild unavailable (developer dir $DEVDIR)" "Only Command Line Tools selected; full Xcode $MIN_XCODE needed to build"
+    add_check xcode "Xcode version" "$(required xcode)" fail "Xcode >= $MIN_XCODE" "xcodebuild -version failed (developer dir $DEVDIR)" "Only Command Line Tools selected, or Xcode's license/first-launch setup is not done; full Xcode $MIN_XCODE needed to build (owner's action)"
   fi
 elif [ "$IS_MAC" = 1 ]; then
   add_check xcode "Xcode version" "$(required xcode)" fail "Xcode >= $MIN_XCODE" "no developer directory" "$NO_DEVTOOLS_REASON"

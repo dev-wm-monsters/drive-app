@@ -3,11 +3,10 @@
 <!--
   Export options for a Developer ID (outside the Mac App Store) build.
   Used by scripts/build-dmg.sh for SIGNED builds only. The script copies this
-  file to a temporary directory and sets teamID from the APPLE_TEAM_ID secret,
-  so no team ID is committed here.
-  If G0 shows that a target (e.g. the FSKit extension) needs a Developer ID
-  provisioning profile, add a provisioningProfiles dictionary
-  (bundle ID -> profile name) here.
+  file to a temporary directory, sets teamID from the APPLE_TEAM_ID secret and
+  adds a provisioningProfiles dictionary (bundle ID -> profile UUID) for the
+  FSKit module (MACOS_PROFILE_FSEXT_BASE64) and, if given, the app
+  (MACOS_PROFILE_APP_BASE64). Nothing team- or profile-specific is committed.
 -->
 <plist version="1.0">
 <dict>

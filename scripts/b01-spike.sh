@@ -93,6 +93,9 @@ step() { printf '\n== %s\n' "$*" >&2; }
 die()  { say "b01-spike: $*"; exit 1; }
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# xcrun and the /usr/bin developer shims open an install dialog when no developer
+# directory is selected; check first (same guard as validate-env.sh).
+have_devtools() { local d; d="$(xcode-select -p 2>/dev/null)" && [ -d "$d" ]; }
 
 json_str() {
   local s="${1-}"
@@ -521,7 +524,13 @@ def cmd_eof(mount, manifest, out):
             ok = False
             continue
         size, row = e["size"], {"path": e["path"], "size": e["size"]}
-        fd = open_nocache(files[e["path"]][0])
+        try:
+            fd = open_nocache(files[e["path"]][0])
+        except OSError as exc:
+            row.update({"error": ename(exc.errno), "pass": False})
+            rows.append(row)
+            ok = False
+            continue
         try:
             row["seekEnd"] = os.lseek(fd, 0, os.SEEK_END)
             row["atEOF"] = len(os.pread(fd, 10, size))
@@ -958,7 +967,7 @@ sign_component() { # sign_component ROLE PATH
   local role="$1" p="$2" vrc=0 vout dr info ident team flags runtime ents rel="."
   [ "$p" = "$APP" ] || rel="${p#"$APP"/}"
   vout="$(codesign --verify --strict --verbose=2 "$p" 2>&1)" || vrc=$?
-  dr="$(codesign -d -r- "$p" 2>&1 | sed -n 's/^designated => //p' | head -n 1)"
+  dr="$(codesign -d -r- "$p" 2>&1 | sed -n 's/^designated => //p' | head -n 1 || true)"
   info="$(codesign -dv --verbose=2 "$p" 2>&1 || true)"
   ident="$(printf '%s\n' "$info" | sed -n 's/^Identifier=//p' | head -n 1)"
   team="$(printf '%s\n' "$info" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
@@ -1020,7 +1029,7 @@ cmd_install() {
   done
   spctl_out="$(spctl --assess --type execute -vv "$APP" 2>&1)" || spctl_rc=$?
   say "spctl --assess (report only): rc=$spctl_rc"
-  if xcrun --find stapler >/dev/null 2>&1; then staple_rc=0; xcrun stapler validate "$APP" >/dev/null 2>&1 || staple_rc=$?; fi
+  if have_devtools && xcrun --find stapler >/dev/null 2>&1; then staple_rc=0; xcrun stapler validate "$APP" >/dev/null 2>&1 || staple_rc=$?; fi
 
   local team_count expected_mach st=pass
   team_count="$(printf '%s\n' "$SIGN_TEAMS" | wc -w | tr -d ' ')"
@@ -1050,7 +1059,7 @@ cmd_enable() {
   step "enable: G0-EXT-ACTIVATE"
   if [ "$IS_MAC" = 0 ]; then record_blocked "$LINUX_REASON" G0-EXT-ACTIVATE; return 0; fi
   [ -n "$APP" ] || { record_blocked "DriveApp.app not installed (run install first)" G0-EXT-ACTIVATE; return 0; }
-  local started line="" waited=0 limit st reason sp
+  local started line="" waited=0 limit st reason sp enabled=false
   started="$(now_utc)"
   open "$APP" || true
   cat >&2 <<EOF
@@ -1079,7 +1088,7 @@ EOF
   pluginkit -m -v -p "$FSKIT_EXTENSION_POINT" 2>&1 | redact >"$WORK/pluginkit.txt" || true
   sp="$(service_print)"
   case "$line" in
-    +*) st=pass; reason="" ;;
+    +*) st=pass; reason=""; enabled=true ;;
     "") st=fail; reason="$EXT_ID is not registered with pluginkit ($FSKIT_EXTENSION_POINT)" ;;
     *) st=blocked; reason="extension registered but not enabled (awaiting the user's approval in System Settings)" ;;
   esac
@@ -1087,7 +1096,7 @@ EOF
   cp "$WORK/pluginkit.txt" "$dir/pluginkit.txt"
   printf '%s\n' "$sp" | redact >"$dir/launchctl-print.txt"
   write_result G0-EXT-ACTIVATE "$st" "$reason" \
-    "{\"extensionId\":$(json_str "$EXT_ID"),\"pluginkitLine\":$(json_str "$(printf '%s' "$line" | redact)"),\"enabled\":$(case "$line" in +*) echo true ;; *) echo false ;; esac),\"waitedSeconds\":$waited,\"serviceLabel\":$(json_str "$SERVICE_LABEL"),\"serviceRegistered\":$([ -n "$sp" ] && echo true || echo false),\"servicePid\":$(json_str_or_null "$(printf '%s\n' "$sp" | awk '/^[[:space:]]*pid = / {print $3; exit}')")}" \
+    "{\"extensionId\":$(json_str "$EXT_ID"),\"pluginkitLine\":$(json_str "$(printf '%s' "$line" | redact)"),\"enabled\":$enabled,\"waitedSeconds\":$waited,\"serviceLabel\":$(json_str "$SERVICE_LABEL"),\"serviceRegistered\":$([ -n "$sp" ] && echo true || echo false),\"servicePid\":$(json_str_or_null "$(printf '%s\n' "$sp" | awk '/^[[:space:]]*pid = / {print $3; exit}')")}" \
     "$started" "" '["pluginkit.txt","launchctl-print.txt"]'
 }
 
@@ -1181,13 +1190,20 @@ test_read_range() {
 test_eof() {
   local started n
   started="$(now_utc)"
+  rm -f "$WORK/eof.obs.json"
   py eof "$MOUNTPOINT" "$MANIFEST_CACHE" "$WORK/eof.obs.json" || true
-  n="$(dd if="$MOUNTPOINT/seg-plus-1.bin" bs=1 skip=4194304 count=10 2>/dev/null | wc -c | tr -d ' ')"
+  # dd fails (pipefail) when the read itself errors; record the byte count anyway.
+  n="$(dd if="$MOUNTPOINT/seg-plus-1.bin" bs=1 skip=4194304 count=10 2>/dev/null | wc -c | tr -d ' ' || true)"
   local n2
-  n2="$(dd if="$MOUNTPOINT/seg-plus-1.bin" bs=1 skip=4194305 count=10 2>/dev/null | wc -c | tr -d ' ')"
+  n2="$(dd if="$MOUNTPOINT/seg-plus-1.bin" bs=1 skip=4194305 count=10 2>/dev/null | wc -c | tr -d ' ' || true)"
+  n="${n:-0}"; n2="${n2:-0}"
   local st rs ob
-  st="$(py get "$WORK/eof.obs.json" status)"; rs="$(py get "$WORK/eof.obs.json" reason)"
-  ob="$(py getjson "$WORK/eof.obs.json" observed)"
+  if [ -s "$WORK/eof.obs.json" ]; then
+    st="$(py get "$WORK/eof.obs.json" status)"; rs="$(py get "$WORK/eof.obs.json" reason)"
+    ob="$(py getjson "$WORK/eof.obs.json" observed)"
+  else
+    st=fail; rs="helper produced no observation (see stderr)"; ob=null
+  fi
   if [ "$n" != 1 ] || [ "$n2" != 0 ]; then st=fail; rs="${rs:+$rs; }dd: last byte copied $n (want 1), past EOF copied $n2 (want 0)"; fi
   write_result G0-EOF "$st" "$rs" "{\"python\":$ob,\"dd\":{\"lastByteCopied\":$n,\"pastEOFCopied\":$n2}}" "$started"
 }
@@ -1326,7 +1342,7 @@ test_ipc_auth() {
   if [ -z "$MACH_SERVICE" ]; then record_blocked "DriveAppStorageMachService missing from Info.plist" G0-IPC-AUTH; return 0; fi
   sp="$(service_print)"
   if printf '%s\n' "$sp" | grep -F "$MACH_SERVICE" >/dev/null 2>&1; then registered=true; fi
-  if ! have xcrun || ! xcrun --find swift >/dev/null 2>&1; then record_blocked "swift unavailable for the spoof client" G0-IPC-AUTH; return 0; fi
+  if ! have_devtools || ! xcrun --find swift >/dev/null 2>&1; then record_blocked "swift unavailable for the spoof client" G0-IPC-AUTH; return 0; fi
   write_spoof_source
   t0="$(date '+%Y-%m-%d %H:%M:%S')"
   a="$(spoof_json swift-interpreter xcrun swift "$WORK/spoof-client.swift" "$MACH_SERVICE")"
@@ -1513,7 +1529,7 @@ main() {
     unmount) init_build; cmd_unmount ;;
     collect) init_build; cmd_collect ;;
     all) cmd_all "$@" ;;
-    -h|--help|help|"") sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; [ -n "$cmd" ] || exit 64; exit 0 ;;
+    -h|--help|help|"") sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; [ -n "$cmd" ] || exit 64; exit 0 ;;
     *) die "unknown command '$cmd' (try --help)" ;;
   esac
   say ""

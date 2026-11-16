@@ -43,11 +43,33 @@ TEMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 TEMP_ROOT="${TEMP_ROOT%/}"
 SIGNING_DIR="$TEMP_ROOT/driveapp-signing"
 
+# Provisioning profile folders: Xcode 16 and later read the first; older Xcode
+# and some tools read the second. Profiles are installed into both and removed
+# again by cleanup (only the files this script created).
+PROFILE_DIRS=(
+  "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+  "$HOME/Library/MobileDevice/Provisioning Profiles"
+)
+
+# Must match project.yml: the FSKit module's bundle ID is $(APP_BUNDLE_ID).fsext.
+FS_BUNDLE_SUFFIX=".fsext"
+
+# Unsigned builds: Xcode builds with CODE_SIGNING_ALLOWED=NO and this script
+# ad-hoc signs inside-out. Each entry is "<path inside the .app>|<entitlements
+# file in the repo>". Must match the targets and CODE_SIGN_ENTITLEMENTS in
+# project.yml; the app itself uses ADHOC_APP_ENTITLEMENTS.
+ADHOC_NESTED=(
+  "Contents/MacOS/DriveAppStorageService|StorageService/DriveAppStorageService.entitlements"
+  "Contents/Extensions/DriveAppFS.appex|FileSystemExtension/DriveAppFS.entitlements"
+)
+ADHOC_APP_ENTITLEMENTS="App/DriveApp.entitlements"
+
 # State set by the stages.
 VERSION="${VERSION:-}"
 BUILD_NUMBER="${BUILD_NUMBER:-}"
 MARKETING_VERSION_VALUE=""
 APP_NAME=""
+APP_BUNDLE_ID=""
 PROJECT_NAME=""
 PROJECT_PATH=""
 XCODE_SELECTED=""
@@ -56,6 +78,8 @@ NOTARIZED="no"
 NOTARIZE_SKIP_REASON=""
 KEYCHAIN_PATH=""
 SIGNING_IDENTITY_HASH=""
+FS_PROFILE_UUID=""
+APP_PROFILE_UUID=""
 ARCHIVE_PATH=""
 EXPORTED_APP=""
 DMG_NAME=""
@@ -142,7 +166,8 @@ Builds the DriveApp macOS app with Xcode 26, packages it as a DMG, and
 Commands:
   build       Run every stage (default).
   preflight   Check inputs, platform and tools only; build nothing.
-  cleanup     Delete the temporary keychain and decoded keys. Safe to repeat.
+  cleanup     Delete the temporary keychain, decoded keys and the profiles
+              this script installed. Safe to repeat.
   help        Show this help (same as --help / -h).
 
 Inputs (environment variables or flags):
@@ -153,6 +178,9 @@ Inputs (environment variables or flags):
 
 Optional signing (all or nothing; unset = ad-hoc signed "-unsigned.dmg"):
   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, APPLE_TEAM_ID,
+  MACOS_PROFILE_FSEXT_BASE64 (Developer ID profile for <APP_BUNDLE_ID>.fsext
+                     with the FSKit Module capability; required when signing),
+  MACOS_PROFILE_APP_BASE64 (optional Developer ID profile for the app),
   KEYCHAIN_PASSWORD (optional; random if unset)
 
 Optional notarisation (needs signing too):
@@ -213,6 +241,9 @@ preflight() {
   APP_NAME="$(read_spec_setting APP_NAME)"
   PROJECT_NAME="$(read_spec_name)"
   [[ -n "$APP_NAME" ]] || die "APP_NAME not found in project.yml settings.base."
+  APP_BUNDLE_ID="$(read_spec_setting APP_BUNDLE_ID)"
+  [[ "$APP_BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
+    || die "APP_BUNDLE_ID '$APP_BUNDLE_ID' in project.yml settings.base is missing or not a reverse-DNS bundle ID."
   [[ -n "$PROJECT_NAME" ]] || die "Top-level 'name:' not found in project.yml."
   PROJECT_PATH="$REPO_ROOT/$PROJECT_NAME.xcodeproj"
   log "App name (project.yml APP_NAME): $APP_NAME"
@@ -223,11 +254,22 @@ preflight() {
     [[ -n "${APPLE_TEAM_ID:-}" ]] || die "MACOS_CERT_P12_BASE64 is set but APPLE_TEAM_ID is not. Add the APPLE_TEAM_ID secret (10-character team ID)."
     [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || die "APPLE_TEAM_ID must be a 10-character team ID (A-Z, 0-9)."
     [[ -n "${MACOS_CERT_PASSWORD:-}" ]] || warn "MACOS_CERT_PASSWORD is empty; importing the .p12 with an empty password."
-    log "Signing: Developer ID (MACOS_CERT_P12_BASE64 is set)."
+    # com.apple.developer.fskit.fsmodule is a restricted entitlement, so the
+    # Developer ID-signed FSKit module needs a Developer ID provisioning profile
+    # (TN3125). Without one Xcode stops at "requires a provisioning profile"
+    # after compiling, and even a forced signature would not load. Fail now.
+    [[ -n "${MACOS_PROFILE_FSEXT_BASE64:-}" ]] \
+      || die "MACOS_CERT_P12_BASE64 is set but MACOS_PROFILE_FSEXT_BASE64 is not. A Developer ID build of the FSKit module needs a Developer ID provisioning profile for $APP_BUNDLE_ID$FS_BUNDLE_SUFFIX with the FSKit Module capability (docs/12-pipeline-usage.md). Add the secret, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
+    log "Signing: Developer ID (MACOS_CERT_P12_BASE64 is set), FSKit module profile from MACOS_PROFILE_FSEXT_BASE64."
+    if [[ -n "${MACOS_PROFILE_APP_BASE64:-}" ]]; then
+      log "Signing: app profile from MACOS_PROFILE_APP_BASE64."
+    else
+      log "Signing: no app profile (MACOS_PROFILE_APP_BASE64 not set); the app claims no restricted entitlement."
+    fi
   else
     SIGNED="no"
-    if any_set MACOS_CERT_PASSWORD APPLE_TEAM_ID; then
-      warn "MACOS_CERT_PASSWORD or APPLE_TEAM_ID is set but MACOS_CERT_P12_BASE64 is not; building unsigned."
+    if any_set MACOS_CERT_PASSWORD APPLE_TEAM_ID MACOS_PROFILE_FSEXT_BASE64 MACOS_PROFILE_APP_BASE64; then
+      warn "Some signing secrets are set but MACOS_CERT_P12_BASE64 is not; building unsigned."
     fi
     log "Signing: none (MACOS_CERT_P12_BASE64 not set). Ad-hoc signing; DMG will be named -unsigned."
   fi
@@ -396,7 +438,77 @@ setup_signing() {
   fi
   SIGNING_IDENTITY_HASH="$(printf '%s\n' "$identities" | head -n 1 | awk '{ print $2 }')"
   log "Imported identity: $(printf '%s\n' "$identities" | head -n 1 | sed -e 's/^[[:space:]]*[0-9]*)[[:space:]]*//')"
+
+  install_profile fsext MACOS_PROFILE_FSEXT_BASE64 "$APP_BUNDLE_ID$FS_BUNDLE_SUFFIX" com.apple.developer.fskit.fsmodule
+  FS_PROFILE_UUID="$PROFILE_UUID"
+  if [[ -n "${MACOS_PROFILE_APP_BASE64:-}" ]]; then
+    install_profile app MACOS_PROFILE_APP_BASE64 "$APP_BUNDLE_ID" ""
+    APP_PROFILE_UUID="$PROFILE_UUID"
+  fi
   group_end
+}
+
+# install_profile NAME SECRET_VAR BUNDLE_ID REQUIRED_ENTITLEMENT -> PROFILE_UUID.
+# Decodes a Developer ID provisioning profile, checks that it fits this build
+# (team, App ID, Developer ID type, expiry, certificate, entitlement) and
+# installs it where Xcode looks. Not called in $(...), so `set -e` and die apply.
+PROFILE_UUID=""
+install_profile() {
+  local name="$1" var="$2" bundle_id="$3" required="$4"
+  local raw="$SIGNING_DIR/$name.provisionprofile" plist="$SIGNING_DIR/$name-profile.plist"
+  (umask 077 && printf '%s' "${!var}" | tr -d '[:space:]' | base64 --decode >"$raw") \
+    || die "$var is not valid base64."
+  security cms -D -i "$raw" >"$plist" 2>/dev/null \
+    || die "$var does not decode to a provisioning profile (security cms -D failed). Encode the .provisionprofile file with: base64 -i <file>"
+
+  local uuid pname team appid all_devices expires now
+  uuid="$(plist_get "$plist" UUID || true)"
+  pname="$(plist_get "$plist" Name || true)"
+  team="$(plist_get "$plist" TeamIdentifier:0 || true)"
+  appid="$(plist_get "$plist" Entitlements:com.apple.application-identifier || true)"
+  all_devices="$(plist_get "$plist" ProvisionsAllDevices || true)"
+  expires="$(plutil -extract ExpirationDate raw -o - "$plist" 2>/dev/null || true)"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [[ "$uuid" =~ ^[0-9A-Fa-f-]{36}$ ]] || die "$var: profile has no valid UUID."
+  log "$name profile: \"$pname\" ($uuid), App ID $appid, expires $expires"
+  [[ "$team" == "$APPLE_TEAM_ID" ]] || die "$var: profile team is '$team', expected APPLE_TEAM_ID ($APPLE_TEAM_ID)."
+  [[ "$appid" == "$APPLE_TEAM_ID.$bundle_id" ]] \
+    || die "$var: profile App ID is '$appid', expected $APPLE_TEAM_ID.$bundle_id. Create the profile for that bundle ID."
+  [[ "$all_devices" == "true" ]] \
+    || die "$var: not a Developer ID profile (ProvisionsAllDevices is not true). Create it under Profiles > Distribution > Developer ID."
+  if [[ "$expires" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
+    [[ "$expires" > "$now" ]] || die "$var: profile expired ($expires)."
+  else
+    warn "$var: could not read the profile's ExpirationDate ('$expires'); not checking expiry."
+  fi
+  if [[ -n "$required" ]]; then
+    [[ "$(plist_get "$plist" "Entitlements:$required" || true)" == "true" ]] \
+      || die "$var: profile does not authorise $required. Enable that capability on the App ID and regenerate the profile."
+  fi
+
+  # The imported certificate must be one of the profile's certificates.
+  local i cert_b64 sha match="no"
+  for ((i = 0; i < 50; i++)); do
+    cert_b64="$(plutil -extract "DeveloperCertificates.$i" raw -o - "$plist" 2>/dev/null)" || break
+    sha="$(printf '%s' "$cert_b64" | base64 --decode | openssl sha1 | awk '{ print toupper($NF) }' || true)"
+    if [[ "$sha" == "$SIGNING_IDENTITY_HASH" ]]; then match="yes"; break; fi
+  done
+  [[ "$match" == "yes" ]] \
+    || die "$var: the profile does not include the imported Developer ID Application certificate. Regenerate the profile with that certificate."
+
+  local dir dest
+  for dir in "${PROFILE_DIRS[@]}"; do
+    mkdir -p "$dir"
+    dest="$dir/$uuid.provisionprofile"
+    if [[ -e "$dest" ]]; then
+      log "$name profile already installed at $dest; leaving it in place."
+      continue
+    fi
+    cp "$raw" "$dest"
+    printf '%s\n' "$dest" >>"$SIGNING_DIR/installed-profiles"
+  done
+  rm -f "$raw" "$plist"
+  PROFILE_UUID="$uuid"
 }
 
 run_xcodebuild() {
@@ -440,16 +552,20 @@ archive() {
       "DEVELOPMENT_TEAM=$APPLE_TEAM_ID"
       "ENABLE_HARDENED_RUNTIME=YES"
       "OTHER_CODE_SIGN_FLAGS=--timestamp --options=runtime --keychain $KEYCHAIN_PATH"
+      # Per-target profiles (project.yml maps these to PROVISIONING_PROFILE_SPECIFIER).
+      "DRIVEAPP_FS_PROFILE=$FS_PROFILE_UUID"
+      "DRIVEAPP_APP_PROFILE=$APP_PROFILE_UUID"
     )
   else
-    # Ad-hoc signature ("-") on every target; no team, no certificate.
+    # No signing in Xcode at all. With CODE_SIGN_IDENTITY=- ("Sign to Run
+    # Locally") Xcode still checks entitlements and stops with "requires a
+    # provisioning profile" for the restricted FSKit entitlement. export_app
+    # ad-hoc signs the copied app inside-out instead (adhoc_sign_app).
     settings+=(
-      "CODE_SIGN_STYLE=Manual"
+      "CODE_SIGNING_ALLOWED=NO"
+      "CODE_SIGNING_REQUIRED=NO"
       "CODE_SIGN_IDENTITY=-"
       "DEVELOPMENT_TEAM="
-      "PROVISIONING_PROFILE_SPECIFIER="
-      "CODE_SIGNING_REQUIRED=NO"
-      "CODE_SIGNING_ALLOWED=YES"
     )
   fi
 
@@ -471,21 +587,87 @@ archive() {
   group_end
 }
 
-# Warn if any nested Mach-O code lacks the hardened runtime flag.
+# Nested code inside the app: bundles under Contents (not descending into
+# them) and executables in Contents/MacOS other than the main one.
+list_nested_code() {
+  local app="$1" main
+  main="$(plist_get "$app/Contents/Info.plist" CFBundleExecutable || true)"
+  find "$app/Contents" -mindepth 1 \( -name '*.appex' -o -name '*.xpc' -o -name '*.framework' -o -name '*.app' \) -prune -print 2>/dev/null
+  find "$app/Contents/MacOS" -type f -perm -u+x ! -name "${main:-.}" 2>/dev/null
+}
+
+# Report every nested code item. Signed builds fail on anything notarisation
+# would reject (no Developer ID, no hardened runtime, no secure timestamp).
 check_nested_signatures() {
-  local app="$1" item info
+  local app="$1" item rel info who problems=""
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
+    rel="${item#"$app"/}"
     info="$(codesign -dv --verbose=2 "$item" 2>&1 || true)"
     if [[ "$info" == *"not signed"* ]]; then
-      warn "Not signed: ${item#"$app"/}"
-    elif [[ "$SIGNED" == "yes" && "$info" != *"(runtime)"* ]]; then
-      warn "Hardened runtime flag missing: ${item#"$app"/}"
-    else
-      log "Signed: ${item#"$app"/}"
+      problems="$problems $rel(not signed)"
+    elif [[ "$SIGNED" == "yes" ]]; then
+      [[ "$info" == *"Authority=Developer ID Application"* ]] || problems="$problems $rel(no Developer ID)"
+      [[ "$info" == *"(runtime)"* ]] || problems="$problems $rel(no hardened runtime)"
+      [[ "$info" == *"Timestamp="* ]] || problems="$problems $rel(no secure timestamp)"
+      if [[ "$item" == *.appex && ! -f "$item/Contents/embedded.provisionprofile" ]]; then
+        problems="$problems $rel(no embedded.provisionprofile)"
+      fi
     fi
-  done < <(find "$app/Contents" \( -name '*.appex' -o -name '*.xpc' -o -name '*.framework' -o -name '*.app' \) -prune -print 2>/dev/null; \
-    find "$app/Contents/MacOS" -type f -perm -u+x 2>/dev/null)
+    who="$(printf '%s\n' "$info" | sed -n 's/^Authority=//p' | head -n 1)"
+    [[ -n "$who" ]] || who="$(printf '%s\n' "$info" | sed -n 's/^Signature=//p' | head -n 1)"
+    log "Nested: $rel (${who:-unknown signature})"
+  done < <(list_nested_code "$app")
+  if [[ -n "$problems" ]]; then
+    if [[ "$SIGNED" == "yes" ]]; then die "Nested code problems:$problems"; fi
+    warn "Nested code problems:$problems"
+  fi
+}
+
+# Resolve the build settings an entitlements file uses, for ad-hoc signing.
+resolve_entitlements() {
+  local src="$REPO_ROOT/$1" out="$2" tmp="$2.xml"
+  [[ -f "$src" ]] || die "Entitlements file $1 not found (ADHOC_NESTED / ADHOC_APP_ENTITLEMENTS in build-dmg.sh vs project.yml)."
+  plutil -convert xml1 -o "$tmp" "$src" || die "$1 is not a valid plist."
+  # Unsigned build: DEVELOPMENT_TEAM is empty, exactly as Xcode would expand it.
+  # shellcheck disable=SC2016  # literal $(...) placeholders, not expansions
+  sed -e 's/\$(DEVELOPMENT_TEAM)//g' -e "s/\\\$(APP_BUNDLE_ID)/$APP_BUNDLE_ID/g" "$tmp" >"$out"
+  rm -f "$tmp"
+  # shellcheck disable=SC2016
+  if grep -q '\$(' "$out"; then
+    die "$1 uses a build setting other than DEVELOPMENT_TEAM/APP_BUNDLE_ID; teach resolve_entitlements in build-dmg.sh about it."
+  fi
+  plutil -lint "$out" >/dev/null || die "Resolved entitlements for $1 are not a valid plist."
+}
+
+# Unsigned build: ad-hoc sign the app inside-out with each target's
+# entitlements and the hardened runtime flag (as Xcode would have).
+adhoc_sign_app() {
+  local app="$1" dir="$BUILD_DIR/adhoc-entitlements" entry rel ent n=0 item known
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  # Refuse nested code this script does not know how to sign.
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    known="no"
+    for entry in "${ADHOC_NESTED[@]}"; do
+      if [[ "${item#"$app"/}" == "${entry%%|*}" ]]; then known="yes"; fi
+    done
+    [[ "$known" == "yes" ]] || die "Unknown nested code ${item#"$app"/}: add it to ADHOC_NESTED in scripts/build-dmg.sh."
+  done < <(list_nested_code "$app")
+  for entry in "${ADHOC_NESTED[@]}"; do
+    rel="${entry%%|*}"
+    ent="$dir/$n.entitlements"
+    n=$((n + 1))
+    [[ -e "$app/$rel" ]] || die "Expected nested code $rel is missing from the app (embed phases in project.yml)."
+    resolve_entitlements "${entry#*|}" "$ent"
+    codesign --force --sign - --timestamp=none --options runtime --entitlements "$ent" "$app/$rel" \
+      || die "Ad-hoc signing $rel failed."
+  done
+  ent="$dir/app.entitlements"
+  resolve_entitlements "$ADHOC_APP_ENTITLEMENTS" "$ent"
+  codesign --force --sign - --timestamp=none --options runtime --entitlements "$ent" "$app" \
+    || die "Ad-hoc signing the app failed."
 }
 
 export_app() {
@@ -500,6 +682,13 @@ export_app() {
     cp "$EXPORT_OPTIONS_TEMPLATE" "$options"
     /usr/libexec/PlistBuddy -c "Set :teamID $APPLE_TEAM_ID" "$options" 2>/dev/null \
       || /usr/libexec/PlistBuddy -c "Add :teamID string $APPLE_TEAM_ID" "$options"
+    # Manual export signing needs a profile per bundle ID that had one at build time.
+    /usr/libexec/PlistBuddy -c "Delete :provisioningProfiles" "$options" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" "$options"
+    /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$APP_BUNDLE_ID$FS_BUNDLE_SUFFIX string $FS_PROFILE_UUID" "$options"
+    if [[ -n "$APP_PROFILE_UUID" ]]; then
+      /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$APP_BUNDLE_ID string $APP_PROFILE_UUID" "$options"
+    fi
     run_xcodebuild export \
       -exportArchive \
       -archivePath "$ARCHIVE_PATH" \
@@ -514,15 +703,12 @@ export_app() {
     [[ "$info" == *"Authority=Developer ID Application"* ]] || die "Exported app is not signed with a Developer ID Application certificate."
     [[ "$info" == *"(runtime)"* ]] || die "Exported app lacks the hardened runtime flag."
   else
-    # Unsigned: Xcode already ad-hoc signed every target inside the archive.
+    # Unsigned: Xcode built without signing; ad-hoc sign the copy here.
     EXPORTED_APP="$EXPORT_DIR/$(basename "$app_rel")"
     ditto "$ARCHIVE_PATH/Products/$app_rel" "$EXPORTED_APP"
-    if ! codesign --verify --deep --strict --verbose=2 "$EXPORTED_APP"; then
-      warn "Ad-hoc signature did not verify; re-signing ad-hoc (best effort)."
-      codesign --force --deep --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$EXPORTED_APP" \
-        || warn "Ad-hoc re-sign failed; continuing (unsigned DMG)."
-      codesign --verify --deep --strict --verbose=2 "$EXPORTED_APP" || warn "Ad-hoc signature still does not verify."
-    fi
+    adhoc_sign_app "$EXPORTED_APP"
+    codesign --verify --deep --strict --verbose=2 "$EXPORTED_APP" || die "Ad-hoc signature of the app does not verify."
+    log "Unsigned build: the FSKit module claims a restricted entitlement without a profile, so macOS will not load it. Only the app itself is testable."
   fi
   check_nested_signatures "$EXPORTED_APP"
   local short build
@@ -661,8 +847,18 @@ publish_release() {
 
 # Idempotent; never fails. Removes the keychain and every decoded key.
 cleanup() {
-  local kc
+  local kc profile dir ours
   if [[ -d "$SIGNING_DIR" ]]; then
+    # Remove only the profile files this script installed (listed by path).
+    if [[ -f "$SIGNING_DIR/installed-profiles" ]]; then
+      while IFS= read -r profile; do
+        ours="no"
+        for dir in "${PROFILE_DIRS[@]}"; do
+          if [[ "$profile" == "$dir/"*.provisionprofile ]]; then ours="yes"; fi
+        done
+        if [[ "$ours" == "yes" && -f "$profile" ]]; then rm -f "$profile" || true; fi
+      done <"$SIGNING_DIR/installed-profiles"
+    fi
     if command -v security >/dev/null 2>&1; then
       if [[ -f "$SIGNING_DIR/original-keychains" ]]; then
         local -a original=()
@@ -679,7 +875,7 @@ cleanup() {
       done
     fi
     rm -rf "$SIGNING_DIR" || true
-    log "Cleanup: removed temporary keychain and decoded keys ($SIGNING_DIR)."
+    log "Cleanup: removed temporary keychain, decoded keys and installed profiles ($SIGNING_DIR)."
   else
     log "Cleanup: nothing to remove."
   fi
