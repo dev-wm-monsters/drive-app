@@ -449,14 +449,19 @@ extension SpikeVolume: FSVolume.ReadWriteOperations {
         let buffer = FSKitBox(value: buffer)
         spawn { [self] in
             var written = 0
+            // NFR06: one 30 s foreground deadline for the whole read, shared by all its chunks,
+            // so a slow service cannot stretch a multi-chunk read past the budget.
+            let deadline = ContinuousClock.now + ServiceHealth.foregroundDeadline
             do throws(StorageError) {
                 for chunk in RangeMath.split(range, maxChunk: Limits.maxReadReply) {
+                    let remaining = deadline - ContinuousClock.now
+                    guard remaining > .zero else { throw .timedOut }
                     let data = try await client.call(.readRange(
                         requestID: client.nextRequestID(),
                         item: file.entry.id,
                         revision: file.entry.revision,
                         offset: Int64(chunk.offset),
-                        length: Int64(chunk.length))).expectBytes()
+                        length: Int64(chunk.length)), timeout: remaining).expectBytes()
                     guard data.count <= Int(chunk.length) else {
                         throw .messageTooLarge(limit: Int(chunk.length), actual: data.count)
                     }
