@@ -4,12 +4,16 @@
   DriveApp (host app) entitlements. Placeholder for the DMG pipeline.
   App Sandbox on. No hardened-runtime exceptions (com.apple.security.cs.*),
   so the app passes notarisation as is.
-  B01 adds com.apple.security.application-groups =
-  $(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID) here (see the shared contract).
+  B01: App Group membership lets the sandboxed app look up the StorageService
+  Mach service, whose name is prefixed by this group (ADR03, G0-VERIFY).
 -->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID)</string>
+	</array>
 </dict>
 </plist>

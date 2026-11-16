@@ -1,16 +1,20 @@
 // Placeholder menu-bar app so the DMG pipeline has something to build.
-// No features yet: it only shows its name and version. B01 adds the FSKit
-// extension and storage service as separate targets (see project.yml).
+// It shows its name and version, plus the B01 spike status section (storage
+// service registration, XPC ping, sample range read, FS extension state).
 
 import AppKit
 import SwiftUI
 
 @main
 struct DriveAppMain: App {
+    @State private var spike = SpikeController()  // B01
+
     var body: some Scene {
         MenuBarExtra(AppInfo.name, systemImage: "externaldrive") {
             Text(AppInfo.name)
             Text(AppInfo.versionLine)
+            Divider()
+            SpikeStatusView(controller: spike)  // B01
             Divider()
             Button("Quit \(AppInfo.name)") {
                 NSApplication.shared.terminate(nil)

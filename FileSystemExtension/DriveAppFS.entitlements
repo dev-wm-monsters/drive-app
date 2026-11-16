@@ -7,7 +7,7 @@
     Needs a provisioning profile from a real team; fskitd rejects unsigned or ad-hoc modules.
   - App Sandbox: mandatory for ExtensionKit extensions.
   - App Group: the StorageService Mach name is prefixed by this group, which is what allows the
-    sandboxed extension to look it up (G0-VERIFY, see Shared/StorageServiceXPC.swift).
+    sandboxed extension to look it up (G0-VERIFY, see StorageService/main.swift).
   No network entitlement: the extension never talks to the network, only to StorageService.
 -->
 <plist version="1.0">

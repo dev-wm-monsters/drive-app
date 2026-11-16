@@ -31,10 +31,10 @@ settings:
     DEAD_CODE_STRIPPING: "YES"
     ENABLE_USER_SCRIPT_SANDBOXING: "YES"
 
-# --- B01: local Swift package (added by the orchestrator) ------------------
-# packages:
-#   StorageCore:
-#     path: Packages/StorageCore
+# --- B01: local Swift package ---------------------------------------------
+packages:
+  StorageCore:
+    path: Packages/StorageCore
 
 targets:
   DriveApp:
@@ -42,6 +42,9 @@ targets:
     platform: macOS
     sources:
       - path: App
+        excludes:
+          - "B01/*.md"
+      - path: Shared
     info:
       path: App/Info.plist
       properties:
@@ -58,6 +61,8 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSUIElement: true
         DriveAppStorageMachService: $(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID).storage
+        DriveAppTeamID: $(DEVELOPMENT_TEAM)
+        DriveAppBaseBundleID: $(APP_BUNDLE_ID)
     settings:
       base:
         PRODUCT_NAME: $(APP_NAME)
@@ -67,28 +72,84 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         ENABLE_PREVIEWS: "NO"
     # --- B01: embed the FSKit extension and the storage service ------------
-    # dependencies:
-    #   - target: DriveAppFS               # embedded in Contents/Extensions
-    #   - target: DriveAppStorageService   # copied to Contents/MacOS
-    #   - package: StorageCore
+    dependencies:
+      - package: StorageCore
+      - target: DriveAppFS
+        embed: true
+        codeSign: true
+        copy:
+          destination: productsDirectory
+          subpath: $(EXTENSIONS_FOLDER_PATH)  # DriveApp.app/Contents/Extensions
+      - target: DriveAppStorageService
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables  # DriveApp.app/Contents/MacOS
+    postBuildScripts:
+      - path: StorageService/generate-launchagent-plist.sh
+        name: Generate StorageService LaunchAgent plist
+        shell: /bin/sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/$(APP_BUNDLE_ID).storageservice.plist
 
-  # --- B01: targets added by the orchestrator ------------------------------
   # Every non-app target MUST set SKIP_INSTALL: "YES", or `xcodebuild archive`
   # produces a generic archive and the DMG export fails.
-  #
-  # DriveAppFS:                  # FSKit module, type app-extension
-  #   PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).fsext
-  #   SKIP_INSTALL: "YES"
-  #
-  # DriveAppStorageService:      # CLI tool, LaunchAgent via SMAppService
-  #   PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).storageservice
-  #   SKIP_INSTALL: "YES"
+
+  # FSKit module (ExtensionKit). Info.plist is hand-written (EXAppExtension-
+  # Attributes), so no `info:` block here: XcodeGen would overwrite it.
+  DriveAppFS:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - path: FileSystemExtension
+        excludes:
+          - "Info.plist"
+          - "*.entitlements"
+      - path: Shared
+    dependencies:
+      - package: StorageCore
+    settings:
+      base:
+        PRODUCT_NAME: DriveAppFS
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).fsext
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: FileSystemExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: FileSystemExtension/DriveAppFS.entitlements
+        ENABLE_APP_SANDBOX: "YES"
+        SKIP_INSTALL: "YES"
+
+  # StorageService: CLI tool launched as a LaunchAgent via SMAppService.
+  # PRODUCT_NAME is referenced by the generated LaunchAgent plist; keep it.
+  DriveAppStorageService:
+    type: tool
+    platform: macOS
+    sources:
+      - path: StorageService
+        excludes:
+          - "Info.plist"
+          - "*.entitlements"
+          - "*.sh"
+      - path: Shared
+    dependencies:
+      - package: StorageCore
+    settings:
+      base:
+        PRODUCT_NAME: DriveAppStorageService
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).storageservice
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: StorageService/Info.plist
+        CREATE_INFOPLIST_SECTION_IN_BINARY: "YES"
+        CODE_SIGN_ENTITLEMENTS: StorageService/DriveAppStorageService.entitlements
+        ENABLE_APP_SANDBOX: "NO"  # see the entitlements file header
+        SKIP_INSTALL: "YES"
 
 schemes:
   DriveApp:
     build:
       targets:
         DriveApp: all
+        DriveAppFS: all
+        DriveAppStorageService: all
     run:
       config: Debug
     test:
