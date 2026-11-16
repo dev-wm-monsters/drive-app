@@ -53,12 +53,12 @@ final class SpikeFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations, @un
             logger.error("loadResource: not a \(Self.urlScheme, privacy: .public)://\(Self.catalogHost, privacy: .public) URL resource")
             return reply(nil, fs_errorForPOSIXError(EINVAL))
         }
-        if options.taskOptions.contains("-f") {
-            return reply(nil, fs_errorForPOSIXError(ENOTSUP)) // Nothing to format.
-        }
+        // FSUnaryFileSystem.h: loadResource supports `-f` ("force") and `--rdonly`. Force needs no
+        // special handling here; it is not a format request and must not fail the load.
+        let forceRequested = options.taskOptions.contains("-f")
         // The volume is read-only whether or not `--rdonly` was passed (FR12).
         let readOnlyRequested = options.taskOptions.contains("--rdonly")
-        logger.info("loadResource: rdonly option \(readOnlyRequested, privacy: .public)")
+        logger.info("loadResource: force \(forceRequested, privacy: .public), rdonly \(readOnlyRequested, privacy: .public)")
 
         containerStatus = .ready
         let volume = SpikeVolume(client: client,

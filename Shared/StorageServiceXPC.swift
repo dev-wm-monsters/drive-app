@@ -13,9 +13,12 @@
 // - https://developer.apple.com/documentation/foundation/nsxpcconnection/invalidationhandler
 // - https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
 //
-// G0-VERIFY: NSXPCConnection is `Sendable` in the current SDK documentation. If the macOS 26.0 SDK
-// does not mark it Sendable, storing it in `Mutex` state still compiles, but returning it out of
-// `withLock` may need `nonisolated(unsafe)`. Check on the first Xcode build.
+// NSXPCConnection is NOT Sendable in the macOS 26.5 SDK: NSXPCConnection.h sits inside
+// NS_HEADER_AUDIT_BEGIN(nullability, sendability) without NS_SWIFT_SENDABLE, and the Foundation
+// overlay adds no conformance. It may be stored in and returned from `Mutex` state, but it must not
+// be passed into a `withLock` closure (that merges it into the `inout sending` region: Swift 6 error).
+// G0-VERIFY: checked only against a non-Sendable stand-in with Swift 6.2 on Linux (`-emit-sil`);
+// confirm on the first Xcode build.
 
 import Foundation
 import os
@@ -230,7 +233,8 @@ public final class StorageServiceClient: Sendable {
 
         let result = await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Result<Data, StorageError>, Never>) in
-                slot.install(continuation)
+                // Already cancelled or timed out: do not send a request nobody will wait for.
+                guard slot.install(continuation) else { return }
                 let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
                     // Interrupted/invalidated before a reply. The connection handlers record health.
                     slot.resume(.failure(.serviceUnavailable))
@@ -318,8 +322,13 @@ public final class StorageServiceClient: Sendable {
     }
 
     private func connectionInvalidated(_ connection: NSXPCConnection?) {
+        // Compare by ObjectIdentifier (Sendable): using the non-Sendable connection itself inside
+        // withLock merges it into the `inout sending` state's region, which Swift 6 rejects.
+        let invalidated = connection.map(ObjectIdentifier.init)
         state.withLock { state in
-            if let connection, state.connection === connection { state.connection = nil }
+            if let invalidated, let current = state.connection, ObjectIdentifier(current) == invalidated {
+                state.connection = nil
+            }
             state.health.record(.invalidated)
         }
     }
@@ -347,7 +356,8 @@ private final class ReplySlot: Sendable {
 
     private let box = Mutex(Box())
 
-    func install(_ continuation: CheckedContinuation<Result<Data, StorageError>, Never>) {
+    /// Returns false if a result was already delivered (the continuation is resumed with it).
+    func install(_ continuation: CheckedContinuation<Result<Data, StorageError>, Never>) -> Bool {
         let ready = box.withLock { box -> Result<Data, StorageError>? in
             if let early = box.early {
                 box.early = nil
@@ -357,7 +367,9 @@ private final class ReplySlot: Sendable {
             box.continuation = continuation
             return nil
         }
-        if let ready { continuation.resume(returning: ready) }
+        guard let ready else { return true }
+        continuation.resume(returning: ready)
+        return false
     }
 
     /// Returns true if `result` is the one delivered.

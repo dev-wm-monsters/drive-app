@@ -115,11 +115,11 @@ final class SpikeVolume: FSVolume, @unchecked Sendable {
     }
 
     private func cancelInFlight(closing: Bool) {
+        // Tasks stay registered until `finished(_:)` removes them; removing them here would make
+        // `finished` record their keys in `finishedEarly`, where nothing ever removes them.
         let tasks = inFlight.withLock { state -> [Task<Void, Never>] in
             if closing { state.closed = true }
-            let tasks = Array(state.tasks.values)
-            state.tasks.removeAll()
-            return tasks
+            return Array(state.tasks.values)
         }
         if !tasks.isEmpty {
             logger.info("Cancelling \(tasks.count, privacy: .public) in-flight operations")
