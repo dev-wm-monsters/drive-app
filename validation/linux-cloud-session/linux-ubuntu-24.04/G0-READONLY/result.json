@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "testId": "G0-READONLY",
+  "gate": "G0",
+  "title": "Writes rejected with read-only errors",
+  "requirements": ["FR12"],
+  "status": "blocked",
+  "reason": "Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavailable",
+  "expected": "touch, mkdir, rm, mv, append, O_CREAT, O_RDWR, truncate, chmod, symlink and utime inside the volume all fail with EROFS (EPERM accepted, noted); fixture files unchanged afterwards",
+  "observed": null,
+  "command": "scripts/b01-spike.sh test  (touch/mkdir/rm -f/mv/append in the volume + python errno probes)",
+  "build": {"id": "linux-cloud-session", "shortVersion": null, "bundleVersion": null, "bundleId": null},
+  "os": {"id": "linux-ubuntu-24.04", "productVersion": "24.04", "buildVersion": null, "model": null},
+  "startedAt": "2026-11-16T07:39:26Z",
+  "finishedAt": "2026-11-16T07:39:26Z",
+  "exitCode": null,
+  "artifacts": [],
+  "fixtureManifest": "fixture-manifest.json",
+  "g0Verify": [],
+  "recordedBy": "scripts/b01-spike.sh (b01-spike/1)"
+}

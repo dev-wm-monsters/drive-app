@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "testId": "G0-ENV",
+  "gate": "G0",
+  "title": "Test machine, OS and SDK validated",
+  "requirements": ["NFR08","NFR10"],
+  "status": "blocked",
+  "reason": "Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavailable",
+  "expected": "validate-env --role test passes: macOS >= 26.0 on arm64, SIP enabled, >= 10 GiB free, swift and python3 present; fixture-check builds and generates the reference fixture and manifest",
+  "observed": {"validateEnv":{"schema":"driveapp.validate-env.v1","generatedAt":"2026-11-16T07:39:26Z","role":"test","host":{"kernel":"Linux","machine":"x86_64","platform":"linux-ubuntu-24.04","model":null,"virtualMachine":null},"summary":{"status":"blocked","pass":3,"fail":0,"blocked":8,"requiredFail":0,"requiredBlocked":3},"checks":[{"id":"os","title":"macOS version","required":true,"status":"blocked","expected":"macOS >= 26.0","observed":"Linux 6.18.44-fc-v470 (linux-ubuntu-24.04)","reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"arch","title":"Apple Silicon (arm64)","required":true,"status":"blocked","expected":"arm64 Mac","observed":"x86_64","reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"xcode","title":"Xcode version","required":false,"status":"blocked","expected":"Xcode >= 26","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"macos_sdk","title":"macOS SDK version","required":false,"status":"blocked","expected":"SDK >= 26.0","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"fskit_sdk","title":"FSKit.framework in SDK","required":false,"status":"blocked","expected":"FSKit.framework with Headers/Modules","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"xcodegen","title":"XcodeGen","required":false,"status":"blocked","expected":"xcodegen on PATH (macOS)","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"signing_identities","title":"Code-signing identities","required":false,"status":"blocked","expected":">= 1 Developer ID Application (Apple Development acceptable for local spike)","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"sip","title":"System Integrity Protection","required":true,"status":"blocked","expected":"enabled","observed":null,"reason":"Not macOS (Linux 6.18.44-fc-v470); this check needs macOS 26.0+ with Xcode 26 (Linux cloud session: no macOS/Xcode; FSKit/XPC/codesign unavailable)"},{"id":"disk_free","title":"Free disk in $HOME volume","required":true,"status":"pass","expected":">= 10 GiB","observed":"26 GiB","reason":""},{"id":"swift","title":"Swift toolchain","required":true,"status":"pass","expected":"swift 6.x","observed":"Swift version 6.2 (swift-6.2-RELEASE)","reason":""},{"id":"python3","title":"python3","required":true,"status":"pass","expected":"python3 >= 3.9","observed":"Python 3.13.18","reason":""}]},"fixtures":{"ready":true,"fixtureCheck":"Packages/StorageCore/.build/release/fixture-check","manifestSaved":true}},
+  "command": "scripts/b01-spike.sh preflight  (runs scripts/validate-env.sh --role test; fixture-check generate <dir>; fixture-check manifest)",
+  "build": {"id": "linux-cloud-session", "shortVersion": null, "bundleVersion": null, "bundleId": null},
+  "os": {"id": "linux-ubuntu-24.04", "productVersion": "24.04", "buildVersion": null, "model": null},
+  "startedAt": "2026-11-16T07:39:25Z",
+  "finishedAt": "2026-11-16T07:39:26Z",
+  "exitCode": 2,
+  "artifacts": [],
+  "fixtureManifest": "fixture-manifest.json",
+  "g0Verify": [],
+  "recordedBy": "scripts/b01-spike.sh (b01-spike/1)"
+}

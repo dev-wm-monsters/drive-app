@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:driveapp:validation:result:v1",
+  "title": "DriveApp validation result",
+  "description": "One result.json per validation/<BUILD>/<OS>/<TEST_ID>/ directory (docs/05-test-plan.md, Evidence layout). Written by scripts/b01-spike.sh or by hand for manual procedures.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "testId",
+    "gate",
+    "title",
+    "status",
+    "reason",
+    "expected",
+    "observed",
+    "command",
+    "build",
+    "os",
+    "startedAt",
+    "finishedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "testId": {
+      "type": "string",
+      "pattern": "^G[0-3]-[A-Z0-9]+(-[A-Z0-9]+)*$|^T[0-9]{2}(-[A-Z0-9]+)*$",
+      "description": "Gate test ID such as G0-MOUNT, or a test-plan ID such as T03."
+    },
+    "gate": { "enum": ["G0", "G1", "G2", "G3"] },
+    "title": { "type": "string", "minLength": 1 },
+    "requirements": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^N?FR[0-9]{2}$" },
+      "uniqueItems": true
+    },
+    "status": { "enum": ["pass", "fail", "blocked"] },
+    "reason": {
+      "type": ["string", "null"],
+      "description": "Why the test failed or is blocked; optional note on a pass."
+    },
+    "expected": { "type": "string", "minLength": 1 },
+    "observed": {
+      "description": "Raw observed values. null when nothing could be observed (blocked)."
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reproducible command or manual procedure."
+    },
+    "build": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "shortVersion": { "type": ["string", "null"] },
+        "bundleVersion": { "type": ["string", "null"] },
+        "bundleId": { "type": ["string", "null"] }
+      }
+    },
+    "os": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z]+-[A-Za-z0-9._-]+$" },
+        "productVersion": { "type": ["string", "null"] },
+        "buildVersion": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "exitCode": { "type": ["integer", "null"] },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[^/].*$" },
+      "uniqueItems": true,
+      "description": "Paths relative to the TEST_ID directory (logs, listings, raw reports)."
+    },
+    "fixtureManifest": {
+      "type": ["string", "null"],
+      "description": "Relative path of the fixture manifest copied next to result.json, if any."
+    },
+    "g0Verify": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Platform assumptions this test must confirm on macOS 26 (G0-VERIFY)."
+    },
+    "recordedBy": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["fail", "blocked"] } } },
+      "then": { "properties": { "reason": { "type": "string", "minLength": 1 } } }
+    },
+    {
+      "if": { "properties": { "testId": { "pattern": "^G0-" } } },
+      "then": { "properties": { "gate": { "const": "G0" } } }
+    }
+  ]
+}

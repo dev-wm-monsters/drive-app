@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "testId": "G0-CANCEL",
+  "gate": "G0",
+  "title": "Reader killed mid-read; volume stays responsive",
+  "requirements": ["FR05"],
+  "status": "blocked",
+  "reason": "Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavailable",
+  "expected": "A cat loop and a slow uncached reader of seg-plus-1.bin are SIGKILLed mid-read, exit within 5 s, and a stat/list/read probe of the volume succeeds with correct bytes within 5 s",
+  "observed": null,
+  "command": "scripts/b01-spike.sh test  (cat loop + slow reader on seg-plus-1.bin, kill -KILL, probe with 5 s timeout)",
+  "build": {"id": "linux-cloud-session", "shortVersion": null, "bundleVersion": null, "bundleId": null},
+  "os": {"id": "linux-ubuntu-24.04", "productVersion": "24.04", "buildVersion": null, "model": null},
+  "startedAt": "2026-11-16T07:39:26Z",
+  "finishedAt": "2026-11-16T07:39:26Z",
+  "exitCode": null,
+  "artifacts": [],
+  "fixtureManifest": "fixture-manifest.json",
+  "g0Verify": ["Whether FSKit delivers kernel-side cancellation to the extension (look for cancel(RequestID) in the redacted log)"],
+  "recordedBy": "scripts/b01-spike.sh (b01-spike/1)"
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "testId": "G0-SERVICE-RESTART",
+  "gate": "G0",
+  "title": "Service restart: reads fail clearly, never hang or return wrong bytes, then recover",
+  "requirements": ["FR03","NFR06","NFR01"],
+  "status": "blocked",
+  "reason": "Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavailable",
+  "expected": "During an uncached read loop: launchctl kickstart -k restarts the service (new pid); a SIGSTOPped service makes reads fail within 30 s (+5 s margin); errors are specific errnos (ENOTCONN/ETIMEDOUT/EIO/ECANCELED...); zero wrong bytes; reads recover within 30 s of restart/resume",
+  "observed": null,
+  "command": "scripts/b01-spike.sh test  (read loop; launchctl kickstart -k gui/$UID/<label> (kill -9 fallback); kill -STOP/-CONT <pid>)",
+  "build": {"id": "linux-cloud-session", "shortVersion": null, "bundleVersion": null, "bundleId": null},
+  "os": {"id": "linux-ubuntu-24.04", "productVersion": "24.04", "buildVersion": null, "model": null},
+  "startedAt": "2026-11-16T07:39:26Z",
+  "finishedAt": "2026-11-16T07:39:26Z",
+  "exitCode": null,
+  "artifacts": [],
+  "fixtureManifest": "fixture-manifest.json",
+  "g0Verify": ["launchctl kickstart -k works on an SMAppService-registered LaunchAgent label","Kernel/FSKit does not impose its own shorter or longer timeout on a stalled extension read"],
+  "recordedBy": "scripts/b01-spike.sh (b01-spike/1)"
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "testId": "G0-UNMOUNT",
+  "gate": "G0",
+  "title": "Clean unmount",
+  "requirements": ["FR03"],
+  "status": "blocked",
+  "reason": "Linux cloud session: no macOS 26/Xcode; FSKit/XPC/codesign unavailable",
+  "expected": "umount <mountpoint> (diskutil unmount fallback) succeeds within 10 s, the mountpoint leaves the mount table and the empty directory is removed",
+  "observed": null,
+  "command": "scripts/b01-spike.sh unmount  (umount <mountpoint> || diskutil unmount <mountpoint>)",
+  "build": {"id": "linux-cloud-session", "shortVersion": null, "bundleVersion": null, "bundleId": null},
+  "os": {"id": "linux-ubuntu-24.04", "productVersion": "24.04", "buildVersion": null, "model": null},
+  "startedAt": "2026-11-16T07:39:26Z",
+  "finishedAt": "2026-11-16T07:39:26Z",
+  "exitCode": null,
+  "artifacts": [],
+  "fixtureManifest": "fixture-manifest.json",
+  "g0Verify": [],
+  "recordedBy": "scripts/b01-spike.sh (b01-spike/1)"
+}
