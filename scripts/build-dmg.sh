@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# scripts/build-dmg.sh: build the macOS app and package it as a DMG.
+# scripts/build-dmg.sh: build the macOS app (DriveApp + its File Provider
+# extension) and package it as a DMG.
 #
 # Used by .github/workflows/build-dmg.yml. It can also run on a Mac by hand.
 # Run `scripts/build-dmg.sh --help` for usage. See docs/12-pipeline-usage.md.
 #
 # Stages (each is a function below):
-#   preflight -> select_xcode -> generate_project -> setup_signing -> archive
-#   -> export_app -> make_dmg -> notarize -> checksum -> publish_release
+#   preflight -> select_xcode -> generate_project -> inspect_targets
+#   -> setup_signing -> archive -> export_app -> make_dmg -> notarize
+#   -> checksum -> publish_release
 #   cleanup runs from an EXIT trap, and again from the workflow (if: always()).
 #
 # Secrets come only from the environment. The script never prints them and
-# never enables `set -x`.
+# never enables `set -x`. The Google OAuth client IDs and Drive root are NOT
+# secrets (they ship inside the app's Info.plist); they come from repository
+# variables and are passed to xcodebuild as build settings.
 #
 # Written for bash 3.2 (macOS /bin/bash) as well as bash 5.
 
@@ -27,8 +31,18 @@ PROJECT_SPEC="$REPO_ROOT/project.yml"
 EXPORT_OPTIONS_TEMPLATE="$SCRIPT_DIR/ExportOptions.plist"
 
 SCHEME="${SCHEME:-DriveApp}"
-APP_TARGET="${APP_TARGET:-DriveApp}"
 CONFIGURATION="${CONFIGURATION:-Release}"
+
+# Target names are fixed by the project contract (project.yml).
+APP_TARGET="DriveApp"                # sandboxed menu-bar app
+EXT_TARGET="DriveAppFileProvider"    # File Provider app extension (Contents/PlugIns)
+EXT_BUNDLE_SUFFIX=".fileprovider"    # its bundle ID is $(APP_BUNDLE_ID).fileprovider
+
+# Build settings project.yml maps to PROVISIONING_PROFILE_SPECIFIER per target.
+# Never set PROVISIONING_PROFILE_SPECIFIER globally: it would also reach the
+# Swift package targets, which cannot carry a profile.
+APP_PROFILE_SETTING="DRIVEAPP_APP_PROFILE"
+EXT_PROFILE_SETTING="DRIVEAPP_EXT_PROFILE"
 
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
 DERIVED_DATA_DIR="$BUILD_DIR/DerivedData"
@@ -36,6 +50,7 @@ LOG_DIR="$BUILD_DIR/logs"
 EXPORT_DIR="$BUILD_DIR/export"
 STAGING_DIR="$BUILD_DIR/dmg-staging"
 DIST_DIR="$BUILD_DIR/dist"
+TARGET_INFO_DIR="$BUILD_DIR/targets"
 
 # Signing material (temporary keychain, decoded .p12/.p8, ExportOptions copy).
 # Fixed path so that `cleanup`, run as a separate workflow step, finds it.
@@ -51,25 +66,14 @@ PROFILE_DIRS=(
   "$HOME/Library/MobileDevice/Provisioning Profiles"
 )
 
-# Must match project.yml: the FSKit module's bundle ID is $(APP_BUNDLE_ID).fsext.
-FS_BUNDLE_SUFFIX=".fsext"
-
-# Unsigned builds: Xcode builds with CODE_SIGNING_ALLOWED=NO and this script
-# ad-hoc signs inside-out. Each entry is "<path inside the .app>|<entitlements
-# file in the repo>". Must match the targets and CODE_SIGN_ENTITLEMENTS in
-# project.yml; the app itself uses ADHOC_APP_ENTITLEMENTS.
-ADHOC_NESTED=(
-  "Contents/MacOS/DriveAppStorageService|StorageService/DriveAppStorageService.entitlements"
-  "Contents/Extensions/DriveAppFS.appex|FileSystemExtension/DriveAppFS.entitlements"
-)
-ADHOC_APP_ENTITLEMENTS="App/DriveApp.entitlements"
-
 # State set by the stages.
 VERSION="${VERSION:-}"
 BUILD_NUMBER="${BUILD_NUMBER:-}"
 MARKETING_VERSION_VALUE=""
 APP_NAME=""
 APP_BUNDLE_ID=""
+EXT_BUNDLE_ID=""
+EXT_PRODUCT=""
 PROJECT_NAME=""
 PROJECT_PATH=""
 XCODE_SELECTED=""
@@ -78,8 +82,10 @@ NOTARIZED="no"
 NOTARIZE_SKIP_REASON=""
 KEYCHAIN_PATH=""
 SIGNING_IDENTITY_HASH=""
-FS_PROFILE_UUID=""
 APP_PROFILE_UUID=""
+EXT_PROFILE_UUID=""
+APP_RESTRICTED=""
+EXT_RESTRICTED=""
 ARCHIVE_PATH=""
 EXPORTED_APP=""
 DMG_NAME=""
@@ -88,6 +94,12 @@ SHA_PATH=""
 RELEASE_TAG=""
 RELEASE_URL=""
 PUBLISH="${PUBLISH_RELEASE:-}"
+# Non-secret app configuration (repository variables), see validate_app_config.
+GOOGLE_CLIENT_ID_MAC="${GOOGLE_CLIENT_ID_MAC:-}"
+GOOGLE_REVERSED_CLIENT_ID="${GOOGLE_REVERSED_CLIENT_ID:-}"
+DRIVE_ROOT_SHARED_DRIVE_NAME="${DRIVE_ROOT_SHARED_DRIVE_NAME:-}"
+DRIVE_ROOT_FOLDER_ID="${DRIVE_ROOT_FOLDER_ID:-}"
+CONFIG_SETTINGS=()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,12 +172,13 @@ usage() {
   cat <<'EOF'
 Usage: scripts/build-dmg.sh [COMMAND] [--version X.Y.Z] [--build-number N]
 
-Builds the DriveApp macOS app with Xcode 26, packages it as a DMG, and
-(on GitHub Actions) attaches it to a draft pre-release v<version>-b<build>.
+Builds DriveApp (menu-bar app + File Provider extension) with Xcode 26,
+packages it as a DMG, and (on GitHub Actions) attaches it to a draft
+pre-release v<version>-b<build>.
 
 Commands:
   build       Run every stage (default).
-  preflight   Check inputs, platform and tools only; build nothing.
+  preflight   Check inputs, platform, tools and app configuration only.
   cleanup     Delete the temporary keychain, decoded keys and the profiles
               this script installed. Safe to repeat.
   help        Show this help (same as --help / -h).
@@ -176,12 +189,20 @@ Inputs (environment variables or flags):
                      gets the numeric part only.
   BUILD_NUMBER       Digits only (CFBundleVersion), e.g. 1.
 
-Optional signing (all or nothing; unset = ad-hoc signed "-unsigned.dmg"):
+App configuration (repository variables; not secret; empty = warning and the
+project.yml default is kept):
+  GOOGLE_CLIENT_ID_MAC         Google OAuth "iOS" client ID for the bundle ID.
+  GOOGLE_REVERSED_CLIENT_ID    URL scheme; derived from the client ID if empty.
+  DRIVE_ROOT_SHARED_DRIVE_NAME Shared drive name (project default WakeupMonster).
+  DRIVE_ROOT_FOLDER_ID         Folder ID; non-empty overrides the drive name.
+
+Optional signing (unset MACOS_CERT_P12_BASE64 = ad-hoc signed "-unsigned.dmg"):
   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, APPLE_TEAM_ID,
-  MACOS_PROFILE_FSEXT_BASE64 (Developer ID profile for <APP_BUNDLE_ID>.fsext
-                     with the FSKit Module capability; required when signing),
-  MACOS_PROFILE_APP_BASE64 (optional Developer ID profile for the app),
-  KEYCHAIN_PASSWORD (optional; random if unset)
+  KEYCHAIN_PASSWORD (optional; random if unset),
+  MACOS_PROFILE_APP_BASE64 (Developer ID profile for <APP_BUNDLE_ID>),
+  MACOS_PROFILE_EXT_BASE64 (Developer ID profile for <APP_BUNDLE_ID>.fileprovider).
+  A profile is required for a target only if its entitlements claim a
+  restricted entitlement (e.g. keychain-access-groups); the run says so.
 
 Optional notarisation (needs signing too):
   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_BASE64
@@ -196,8 +217,8 @@ Other environment:
 
 Outputs: build/dist/<App>-<version>-<build>[-unsigned].dmg and .dmg.sha256
 
-Runs only on macOS. On other systems `preflight`/`build` stop with a clear
-message; `cleanup` and `help` work anywhere.
+Runs only on macOS. On other systems `preflight`/`build` stop with exit code 3
+after checking the inputs; `cleanup` and `help` work anywhere.
 EOF
 }
 
@@ -218,22 +239,74 @@ validate_inputs() {
   RELEASE_TAG="v${VERSION}-b${BUILD_NUMBER}"
 }
 
+# Google OAuth / Drive root configuration from repository variables. These are
+# public identifiers, not secrets. Empty values only warn, so an unconfigured
+# fork still builds (the app then reports "not configured" at sign-in).
+validate_app_config() {
+  local suffix=".apps.googleusercontent.com" derived=""
+  CONFIG_SETTINGS=()
+  if [[ -n "$GOOGLE_CLIENT_ID_MAC" ]]; then
+    [[ "$GOOGLE_CLIENT_ID_MAC" =~ ^[0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com$ ]] \
+      || die "GOOGLE_CLIENT_ID_MAC ('$GOOGLE_CLIENT_ID_MAC') is not a Google OAuth client ID (<number>-<id>.apps.googleusercontent.com)."
+    derived="com.googleusercontent.apps.${GOOGLE_CLIENT_ID_MAC%"$suffix"}"
+    CONFIG_SETTINGS+=("GOOGLE_CLIENT_ID_MAC=$GOOGLE_CLIENT_ID_MAC")
+    log "Config: GOOGLE_CLIENT_ID_MAC = $GOOGLE_CLIENT_ID_MAC"
+  else
+    warn "GOOGLE_CLIENT_ID_MAC is empty (repository variable). The app will build but cannot sign in to Google until it is set (docs/12-pipeline-usage.md)."
+  fi
+  if [[ -n "$GOOGLE_REVERSED_CLIENT_ID" ]]; then
+    [[ "$GOOGLE_REVERSED_CLIENT_ID" =~ ^com\.googleusercontent\.apps\.[0-9]+-[0-9A-Za-z_]+$ ]] \
+      || die "GOOGLE_REVERSED_CLIENT_ID ('$GOOGLE_REVERSED_CLIENT_ID') is not a reversed Google client ID (com.googleusercontent.apps.<number>-<id>)."
+    if [[ -n "$derived" && "$derived" != "$GOOGLE_REVERSED_CLIENT_ID" ]]; then
+      die "GOOGLE_REVERSED_CLIENT_ID ('$GOOGLE_REVERSED_CLIENT_ID') does not match GOOGLE_CLIENT_ID_MAC (expected $derived). The OAuth redirect would never reach the app."
+    fi
+  elif [[ -n "$derived" ]]; then
+    GOOGLE_REVERSED_CLIENT_ID="$derived"
+    log "Config: GOOGLE_REVERSED_CLIENT_ID is empty; derived $derived from GOOGLE_CLIENT_ID_MAC."
+  else
+    warn "GOOGLE_REVERSED_CLIENT_ID is empty (repository variable); the OAuth redirect URL scheme stays empty."
+  fi
+  if [[ -n "$GOOGLE_REVERSED_CLIENT_ID" ]]; then
+    CONFIG_SETTINGS+=("GOOGLE_REVERSED_CLIENT_ID=$GOOGLE_REVERSED_CLIENT_ID")
+    log "Config: GOOGLE_REVERSED_CLIENT_ID = $GOOGLE_REVERSED_CLIENT_ID"
+  fi
+  if [[ -n "$DRIVE_ROOT_SHARED_DRIVE_NAME" ]]; then
+    # '$' would be read as a build-setting reference; control characters and
+    # quotes would break Info.plist expansion.
+    if [[ "$DRIVE_ROOT_SHARED_DRIVE_NAME" == *'$'* || "$DRIVE_ROOT_SHARED_DRIVE_NAME" == *'"'* \
+      || "$DRIVE_ROOT_SHARED_DRIVE_NAME" =~ [[:cntrl:]] ]]; then
+      die "DRIVE_ROOT_SHARED_DRIVE_NAME must not contain \$, \" or control characters."
+    fi
+    CONFIG_SETTINGS+=("DRIVE_ROOT_SHARED_DRIVE_NAME=$DRIVE_ROOT_SHARED_DRIVE_NAME")
+    log "Config: DRIVE_ROOT_SHARED_DRIVE_NAME = $DRIVE_ROOT_SHARED_DRIVE_NAME"
+  else
+    log "Config: DRIVE_ROOT_SHARED_DRIVE_NAME not set; keeping the project.yml default (WakeupMonster)."
+  fi
+  if [[ -n "$DRIVE_ROOT_FOLDER_ID" ]]; then
+    [[ "$DRIVE_ROOT_FOLDER_ID" =~ ^[0-9A-Za-z_-]{10,}$ ]] \
+      || die "DRIVE_ROOT_FOLDER_ID ('$DRIVE_ROOT_FOLDER_ID') is not a Drive folder ID (letters, digits, - and _)."
+    CONFIG_SETTINGS+=("DRIVE_ROOT_FOLDER_ID=$DRIVE_ROOT_FOLDER_ID")
+    log "Config: DRIVE_ROOT_FOLDER_ID = $DRIVE_ROOT_FOLDER_ID (overrides the shared drive name)."
+  fi
+}
+
 preflight() {
   group_start "Preflight"
   validate_inputs
   log "Version $VERSION (CFBundleShortVersionString $MARKETING_VERSION_VALUE), build $BUILD_NUMBER, release tag $RELEASE_TAG"
+  validate_app_config
 
   local os
   os="$(uname -s)"
   if [[ "$os" != "Darwin" ]]; then
-    die "This build needs macOS with Xcode 26 (found $os). On Linux, only static checks are possible: actionlint .github/workflows/build-dmg.yml; shellcheck -x scripts/build-dmg.sh. Run the build on GitHub Actions (Actions > Build DMG > Run workflow) or on a Mac." 3
+    die "This build needs macOS with Xcode 26 (found $os). On Linux, only static checks are possible: actionlint; shellcheck -x scripts/build-dmg.sh. Run the build on GitHub Actions (Actions > Build DMG > Run workflow) or on a Mac." 3
   fi
   log "Host: $(sw_vers -productName) $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(uname -m)"
   [[ "$(uname -m)" == "arm64" ]] || warn "Host is $(uname -m), not arm64. The build still targets arm64 only."
 
   [[ -f "$PROJECT_SPEC" ]] || die "project.yml not found at $PROJECT_SPEC."
   local tool
-  for tool in xcrun hdiutil codesign security shasum ditto openssl base64 awk; do
+  for tool in xcrun hdiutil codesign security shasum ditto openssl base64 awk perl plutil; do
     require_tool "$tool" "It ships with macOS."
   done
   [[ -x /usr/libexec/PlistBuddy ]] || die "/usr/libexec/PlistBuddy not found."
@@ -244,31 +317,32 @@ preflight() {
   APP_BUNDLE_ID="$(read_spec_setting APP_BUNDLE_ID)"
   [[ "$APP_BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
     || die "APP_BUNDLE_ID '$APP_BUNDLE_ID' in project.yml settings.base is missing or not a reverse-DNS bundle ID."
+  EXT_BUNDLE_ID="$APP_BUNDLE_ID$EXT_BUNDLE_SUFFIX"
   [[ -n "$PROJECT_NAME" ]] || die "Top-level 'name:' not found in project.yml."
   PROJECT_PATH="$REPO_ROOT/$PROJECT_NAME.xcodeproj"
-  log "App name (project.yml APP_NAME): $APP_NAME"
+  log "App name (project.yml APP_NAME): $APP_NAME, bundle IDs $APP_BUNDLE_ID and $EXT_BUNDLE_ID"
 
-  # Signing inputs: all or nothing.
+  # Signing inputs.
   if [[ -n "${MACOS_CERT_P12_BASE64:-}" ]]; then
     SIGNED="yes"
     [[ -n "${APPLE_TEAM_ID:-}" ]] || die "MACOS_CERT_P12_BASE64 is set but APPLE_TEAM_ID is not. Add the APPLE_TEAM_ID secret (10-character team ID)."
     [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || die "APPLE_TEAM_ID must be a 10-character team ID (A-Z, 0-9)."
     [[ -n "${MACOS_CERT_PASSWORD:-}" ]] || warn "MACOS_CERT_PASSWORD is empty; importing the .p12 with an empty password."
-    # com.apple.developer.fskit.fsmodule is a restricted entitlement, so the
-    # Developer ID-signed FSKit module needs a Developer ID provisioning profile
-    # (TN3125). Without one Xcode stops at "requires a provisioning profile"
-    # after compiling, and even a forced signature would not load. Fail now.
-    [[ -n "${MACOS_PROFILE_FSEXT_BASE64:-}" ]] \
-      || die "MACOS_CERT_P12_BASE64 is set but MACOS_PROFILE_FSEXT_BASE64 is not. A Developer ID build of the FSKit module needs a Developer ID provisioning profile for $APP_BUNDLE_ID$FS_BUNDLE_SUFFIX with the FSKit Module capability (docs/12-pipeline-usage.md). Add the secret, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
-    log "Signing: Developer ID (MACOS_CERT_P12_BASE64 is set), FSKit module profile from MACOS_PROFILE_FSEXT_BASE64."
+    log "Signing: Developer ID (MACOS_CERT_P12_BASE64 is set)."
     if [[ -n "${MACOS_PROFILE_APP_BASE64:-}" ]]; then
       log "Signing: app profile from MACOS_PROFILE_APP_BASE64."
     else
-      log "Signing: no app profile (MACOS_PROFILE_APP_BASE64 not set); the app claims no restricted entitlement."
+      log "Signing: no app profile (MACOS_PROFILE_APP_BASE64 not set)."
     fi
+    if [[ -n "${MACOS_PROFILE_EXT_BASE64:-}" ]]; then
+      log "Signing: File Provider extension profile from MACOS_PROFILE_EXT_BASE64."
+    else
+      log "Signing: no extension profile (MACOS_PROFILE_EXT_BASE64 not set)."
+    fi
+    log "Signing: whether a profile is required is decided from each target's entitlements after the project is generated."
   else
     SIGNED="no"
-    if any_set MACOS_CERT_PASSWORD APPLE_TEAM_ID MACOS_PROFILE_FSEXT_BASE64 MACOS_PROFILE_APP_BASE64; then
+    if any_set MACOS_CERT_PASSWORD APPLE_TEAM_ID MACOS_PROFILE_APP_BASE64 MACOS_PROFILE_EXT_BASE64; then
       warn "Some signing secrets are set but MACOS_CERT_P12_BASE64 is not; building unsigned."
     fi
     log "Signing: none (MACOS_CERT_P12_BASE64 not set). Ad-hoc signing; DMG will be named -unsigned."
@@ -376,16 +450,124 @@ generate_project() {
   log "XcodeGen $(xcodegen --version 2>/dev/null | awk '{ print $NF }')"
   (cd "$REPO_ROOT" && xcodegen generate --spec "$PROJECT_SPEC")
   [[ -d "$PROJECT_PATH" ]] || die "XcodeGen did not create $PROJECT_PATH."
+  xcodebuild -project "$PROJECT_PATH" -list
+  group_end
+}
 
-  # The build setting is the authority for the product name.
-  local product
-  product="$(xcodebuild -project "$PROJECT_PATH" -target "$APP_TARGET" -configuration "$CONFIGURATION" \
-    -showBuildSettings 2>/dev/null | awk -F' = ' '/^ *PRODUCT_NAME = / { print $2; exit }')"
+# Settings shared by -showBuildSettings and archive (signing settings excluded).
+common_settings() {
+  COMMON_SETTINGS=(
+    "ARCHS=arm64"
+    "ONLY_ACTIVE_ARCH=NO"
+    "MARKETING_VERSION=$MARKETING_VERSION_VALUE"
+    "CURRENT_PROJECT_VERSION=$BUILD_NUMBER"
+  )
+  if [[ "$SIGNED" == "yes" ]]; then
+    COMMON_SETTINGS+=("DEVELOPMENT_TEAM=$APPLE_TEAM_ID")
+  else
+    COMMON_SETTINGS+=("DEVELOPMENT_TEAM=")
+  fi
+  if [[ ${#CONFIG_SETTINGS[@]} -gt 0 ]]; then
+    COMMON_SETTINGS+=("${CONFIG_SETTINGS[@]}")
+  fi
+}
+COMMON_SETTINGS=()
+
+# target_settings TARGET -> writes NAME=value lines to $TARGET_INFO_DIR/TARGET.settings
+target_settings() {
+  local target="$1" out="$TARGET_INFO_DIR/$1.settings"
+  mkdir -p "$TARGET_INFO_DIR"
+  xcodebuild -project "$PROJECT_PATH" -target "$target" -configuration "$CONFIGURATION" \
+    -showBuildSettings "${COMMON_SETTINGS[@]}" 2>/dev/null \
+    | sed -n -E 's/^[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) =[[:space:]]?(.*)$/\1=\2/p' >"$out" \
+    || die "xcodebuild -showBuildSettings failed for target $target (is it defined in project.yml?)."
+  [[ -s "$out" ]] || die "No build settings for target $target. project.yml must define targets $APP_TARGET and $EXT_TARGET."
+}
+
+setting_of() { # setting_of TARGET NAME
+  awk -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$TARGET_INFO_DIR/$1.settings"
+}
+
+# resolve_entitlements TARGET OUT: the target's CODE_SIGN_ENTITLEMENTS with
+# every $(NAME) / ${NAME} replaced by that target's build setting (undefined =
+# empty, as Xcode does). Writes an XML plist to OUT.
+resolve_entitlements() {
+  local target="$1" out="$2" rel src tmp="$2.src.xml" missing
+  rel="$(setting_of "$target" CODE_SIGN_ENTITLEMENTS)"
+  [[ -n "$rel" ]] || die "Target $target has no CODE_SIGN_ENTITLEMENTS in project.yml."
+  case "$rel" in /*) src="$rel" ;; *) src="$REPO_ROOT/$rel" ;; esac
+  [[ -f "$src" ]] || die "Entitlements file $rel for target $target not found."
+  plutil -convert xml1 -o "$tmp" "$src" || die "$rel is not a valid plist."
+  # shellcheck disable=SC2016  # $1 etc. are perl variables
+  missing="$(perl -e '
+    my ($settings, $in, $out) = @ARGV;
+    my %s; open(my $fh, "<", $settings) or die; while (<$fh>) { chomp; my ($k, $v) = split(/=/, $_, 2); $s{$k} = $v unless exists $s{$k}; } close $fh;
+    local $/; open($fh, "<", $in) or die; my $t = <$fh>; close $fh;
+    my %miss;
+    for (1 .. 5) { $t =~ s/\$[({]([A-Za-z_][A-Za-z0-9_]*)[)}]/ exists $s{$1} ? $s{$1} : do { $miss{$1} = 1; "" } /ge; }
+    open($fh, ">", $out) or die; print $fh $t; close $fh;
+    print join(" ", sort keys %miss);
+  ' "$TARGET_INFO_DIR/$target.settings" "$tmp" "$out")" || die "Could not resolve the entitlements of $target."
+  rm -f "$tmp"
+  [[ -z "$missing" ]] || warn "$rel uses undefined build settings (expanded to empty): $missing"
+  plutil -lint "$out" >/dev/null || die "Resolved entitlements for $target are not a valid plist."
+}
+
+# Top-level entitlement keys that a provisioning profile must authorise on
+# macOS. Unrestricted (TN3125): com.apple.security.* (App Sandbox, App Groups,
+# hardened-runtime exceptions, ...). Everything else (keychain-access-groups,
+# com.apple.application-identifier, com.apple.developer.*) is restricted.
+restricted_keys() {
+  # shellcheck disable=SC2016
+  plutil -convert json -o - "$1" | perl -MJSON::PP -e '
+    local $/; my $d = JSON::PP->new->decode(<STDIN>);
+    print join(" ", grep { !/^com\.apple\.security\./ } sort keys %$d);'
+}
+
+# Read the targets' real settings (bundle IDs, product names, entitlements)
+# from the generated project and decide which targets need a profile.
+inspect_targets() {
+  group_start "Inspect targets"
+  common_settings
+  target_settings "$APP_TARGET"
+  target_settings "$EXT_TARGET"
+
+  local product app_id ext_id ext_type
+  product="$(setting_of "$APP_TARGET" PRODUCT_NAME)"
   if [[ -n "$product" && "$product" != "$APP_NAME" ]]; then
     warn "PRODUCT_NAME ($product) differs from project.yml APP_NAME ($APP_NAME); using $product."
     APP_NAME="$product"
   fi
-  xcodebuild -project "$PROJECT_PATH" -list
+  app_id="$(setting_of "$APP_TARGET" PRODUCT_BUNDLE_IDENTIFIER)"
+  ext_id="$(setting_of "$EXT_TARGET" PRODUCT_BUNDLE_IDENTIFIER)"
+  ext_type="$(setting_of "$EXT_TARGET" WRAPPER_EXTENSION)"
+  EXT_PRODUCT="$(setting_of "$EXT_TARGET" FULL_PRODUCT_NAME)"
+  [[ "$app_id" == "$APP_BUNDLE_ID" ]] || die "$APP_TARGET bundle ID is '$app_id', expected $APP_BUNDLE_ID (project.yml APP_BUNDLE_ID)."
+  [[ "$ext_id" == "$EXT_BUNDLE_ID" ]] || die "$EXT_TARGET bundle ID is '$ext_id', expected $EXT_BUNDLE_ID."
+  [[ "$ext_type" == "appex" ]] || die "$EXT_TARGET is not an app extension (WRAPPER_EXTENSION '$ext_type'); use type app-extension in project.yml."
+  [[ "$(setting_of "$EXT_TARGET" SKIP_INSTALL)" == "YES" ]] \
+    || die "$EXT_TARGET must set SKIP_INSTALL: YES in project.yml, or the archive is not an app archive."
+  log "$APP_TARGET: $app_id; $EXT_TARGET: $ext_id ($EXT_PRODUCT)"
+
+  resolve_entitlements "$APP_TARGET" "$TARGET_INFO_DIR/$APP_TARGET.entitlements"
+  resolve_entitlements "$EXT_TARGET" "$TARGET_INFO_DIR/$EXT_TARGET.entitlements"
+  APP_RESTRICTED="$(restricted_keys "$TARGET_INFO_DIR/$APP_TARGET.entitlements")"
+  EXT_RESTRICTED="$(restricted_keys "$TARGET_INFO_DIR/$EXT_TARGET.entitlements")"
+  log "$APP_TARGET restricted entitlements: ${APP_RESTRICTED:-none}"
+  log "$EXT_TARGET restricted entitlements: ${EXT_RESTRICTED:-none}"
+
+  if [[ "$SIGNED" == "yes" ]]; then
+    # A restricted entitlement without a profile: Xcode stops with "requires a
+    # provisioning profile", or macOS refuses to launch the process. Fail now.
+    if [[ -n "$APP_RESTRICTED" && -z "${MACOS_PROFILE_APP_BASE64:-}" ]]; then
+      die "$APP_TARGET claims restricted entitlements ($APP_RESTRICTED), so a Developer ID build needs MACOS_PROFILE_APP_BASE64 (Developer ID profile for $APP_BUNDLE_ID). See docs/12-pipeline-usage.md, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
+    fi
+    if [[ -n "$EXT_RESTRICTED" && -z "${MACOS_PROFILE_EXT_BASE64:-}" ]]; then
+      die "$EXT_TARGET claims restricted entitlements ($EXT_RESTRICTED), so a Developer ID build needs MACOS_PROFILE_EXT_BASE64 (Developer ID profile for $EXT_BUNDLE_ID). See docs/12-pipeline-usage.md, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
+    fi
+  elif [[ -n "$APP_RESTRICTED$EXT_RESTRICTED" ]]; then
+    warn "Unsigned build: restricted entitlements (${APP_RESTRICTED:+app: $APP_RESTRICTED; }${EXT_RESTRICTED:+extension: $EXT_RESTRICTED}) cannot be authorised without a profile, so the ad-hoc signature leaves them out (macOS would refuse to launch the app otherwise). Keychain sharing between app and extension will not work in this build."
+  fi
   group_end
 }
 
@@ -439,18 +621,20 @@ setup_signing() {
   SIGNING_IDENTITY_HASH="$(printf '%s\n' "$identities" | head -n 1 | awk '{ print $2 }')"
   log "Imported identity: $(printf '%s\n' "$identities" | head -n 1 | sed -e 's/^[[:space:]]*[0-9]*)[[:space:]]*//')"
 
-  install_profile fsext MACOS_PROFILE_FSEXT_BASE64 "$APP_BUNDLE_ID$FS_BUNDLE_SUFFIX" com.apple.developer.fskit.fsmodule
-  FS_PROFILE_UUID="$PROFILE_UUID"
   if [[ -n "${MACOS_PROFILE_APP_BASE64:-}" ]]; then
-    install_profile app MACOS_PROFILE_APP_BASE64 "$APP_BUNDLE_ID" ""
+    install_profile app MACOS_PROFILE_APP_BASE64 "$APP_BUNDLE_ID" "$APP_RESTRICTED"
     APP_PROFILE_UUID="$PROFILE_UUID"
+  fi
+  if [[ -n "${MACOS_PROFILE_EXT_BASE64:-}" ]]; then
+    install_profile extension MACOS_PROFILE_EXT_BASE64 "$EXT_BUNDLE_ID" "$EXT_RESTRICTED"
+    EXT_PROFILE_UUID="$PROFILE_UUID"
   fi
   group_end
 }
 
-# install_profile NAME SECRET_VAR BUNDLE_ID REQUIRED_ENTITLEMENT -> PROFILE_UUID.
+# install_profile NAME SECRET_VAR BUNDLE_ID "REQUIRED ENTITLEMENT KEYS" -> PROFILE_UUID.
 # Decodes a Developer ID provisioning profile, checks that it fits this build
-# (team, App ID, Developer ID type, expiry, certificate, entitlement) and
+# (team, App ID, Developer ID type, expiry, certificate, entitlements) and
 # installs it where Xcode looks. Not called in $(...), so `set -e` and die apply.
 PROFILE_UUID=""
 install_profile() {
@@ -461,7 +645,7 @@ install_profile() {
   security cms -D -i "$raw" >"$plist" 2>/dev/null \
     || die "$var does not decode to a provisioning profile (security cms -D failed). Encode the .provisionprofile file with: base64 -i <file>"
 
-  local uuid pname team appid all_devices expires now
+  local uuid pname team appid all_devices expires now key
   uuid="$(plist_get "$plist" UUID || true)"
   pname="$(plist_get "$plist" Name || true)"
   team="$(plist_get "$plist" TeamIdentifier:0 || true)"
@@ -481,10 +665,11 @@ install_profile() {
   else
     warn "$var: could not read the profile's ExpirationDate ('$expires'); not checking expiry."
   fi
-  if [[ -n "$required" ]]; then
-    [[ "$(plist_get "$plist" "Entitlements:$required" || true)" == "true" ]] \
-      || die "$var: profile does not authorise $required. Enable that capability on the App ID and regenerate the profile."
-  fi
+  # Every restricted entitlement the target claims must appear in the profile.
+  for key in $required; do
+    /usr/libexec/PlistBuddy -c "Print :Entitlements:$key" "$plist" >/dev/null 2>&1 \
+      || die "$var: profile does not authorise $key, which $bundle_id claims. Enable the matching capability (e.g. Keychain Sharing) on the App ID and regenerate the profile."
+  done
 
   # The imported certificate must be one of the profile's certificates.
   local i cert_b64 sha match="no"
@@ -537,35 +722,29 @@ archive() {
   ARCHIVE_PATH="$BUILD_DIR/$APP_NAME.xcarchive"
   rm -rf "$ARCHIVE_PATH"
 
-  local -a settings=(
-    "ARCHS=arm64"
-    "ONLY_ACTIVE_ARCH=NO"
-    "MARKETING_VERSION=$MARKETING_VERSION_VALUE"
-    "CURRENT_PROJECT_VERSION=$BUILD_NUMBER"
-  )
+  local -a settings=("${COMMON_SETTINGS[@]}")
   if [[ "$SIGNED" == "yes" ]]; then
-    # Applies to every target, so nested code (FSKit .appex, helper tool) is
-    # signed inside-out by Xcode with the same identity and hardened runtime.
+    # Applies to every target, so the .appex is signed inside-out by Xcode with
+    # the same identity and hardened runtime.
     settings+=(
       "CODE_SIGN_STYLE=Manual"
       "CODE_SIGN_IDENTITY=Developer ID Application"
-      "DEVELOPMENT_TEAM=$APPLE_TEAM_ID"
       "ENABLE_HARDENED_RUNTIME=YES"
       "OTHER_CODE_SIGN_FLAGS=--timestamp --options=runtime --keychain $KEYCHAIN_PATH"
       # Per-target profiles (project.yml maps these to PROVISIONING_PROFILE_SPECIFIER).
-      "DRIVEAPP_FS_PROFILE=$FS_PROFILE_UUID"
-      "DRIVEAPP_APP_PROFILE=$APP_PROFILE_UUID"
+      "$APP_PROFILE_SETTING=$APP_PROFILE_UUID"
+      "$EXT_PROFILE_SETTING=$EXT_PROFILE_UUID"
     )
   else
     # No signing in Xcode at all. With CODE_SIGN_IDENTITY=- ("Sign to Run
     # Locally") Xcode still checks entitlements and stops with "requires a
-    # provisioning profile" for the restricted FSKit entitlement. export_app
-    # ad-hoc signs the copied app inside-out instead (adhoc_sign_app).
+    # provisioning profile" for restricted entitlements such as
+    # keychain-access-groups. export_app ad-hoc signs the copied app
+    # inside-out instead (adhoc_sign_app).
     settings+=(
       "CODE_SIGNING_ALLOWED=NO"
       "CODE_SIGNING_REQUIRED=NO"
       "CODE_SIGN_IDENTITY=-"
-      "DEVELOPMENT_TEAM="
     )
   fi
 
@@ -581,7 +760,7 @@ archive() {
 
   local app_rel
   app_rel="$(plist_get "$ARCHIVE_PATH/Info.plist" ApplicationProperties:ApplicationPath || true)"
-  [[ -n "$app_rel" ]] || die "The archive is not an app archive (no ApplicationProperties). Set SKIP_INSTALL: YES on every non-app target (extension, helper tool) in project.yml."
+  [[ -n "$app_rel" ]] || die "The archive is not an app archive (no ApplicationProperties). Set SKIP_INSTALL: YES on every non-app target (the File Provider extension) in project.yml."
   [[ -d "$ARCHIVE_PATH/Products/$app_rel" ]] || die "Archived app not found at Products/$app_rel."
   log "Archived $app_rel"
   group_end
@@ -610,7 +789,7 @@ check_nested_signatures() {
       [[ "$info" == *"Authority=Developer ID Application"* ]] || problems="$problems $rel(no Developer ID)"
       [[ "$info" == *"(runtime)"* ]] || problems="$problems $rel(no hardened runtime)"
       [[ "$info" == *"Timestamp="* ]] || problems="$problems $rel(no secure timestamp)"
-      if [[ "$item" == *.appex && ! -f "$item/Contents/embedded.provisionprofile" ]]; then
+      if [[ "$item" == *.appex && -n "$EXT_PROFILE_UUID" && ! -f "$item/Contents/embedded.provisionprofile" ]]; then
         problems="$problems $rel(no embedded.provisionprofile)"
       fi
     fi
@@ -624,50 +803,72 @@ check_nested_signatures() {
   fi
 }
 
-# Resolve the build settings an entitlements file uses, for ad-hoc signing.
-resolve_entitlements() {
-  local src="$REPO_ROOT/$1" out="$2" tmp="$2.xml"
-  [[ -f "$src" ]] || die "Entitlements file $1 not found (ADHOC_NESTED / ADHOC_APP_ENTITLEMENTS in build-dmg.sh vs project.yml)."
-  plutil -convert xml1 -o "$tmp" "$src" || die "$1 is not a valid plist."
-  # Unsigned build: DEVELOPMENT_TEAM is empty, exactly as Xcode would expand it.
-  # shellcheck disable=SC2016  # literal $(...) placeholders, not expansions
-  sed -e 's/\$(DEVELOPMENT_TEAM)//g' -e "s/\\\$(APP_BUNDLE_ID)/$APP_BUNDLE_ID/g" "$tmp" >"$out"
-  rm -f "$tmp"
-  # shellcheck disable=SC2016
-  if grep -q '\$(' "$out"; then
-    die "$1 uses a build setting other than DEVELOPMENT_TEAM/APP_BUNDLE_ID; teach resolve_entitlements in build-dmg.sh about it."
-  fi
-  plutil -lint "$out" >/dev/null || die "Resolved entitlements for $1 are not a valid plist."
+# Copy resolved entitlements without the restricted keys (unsigned builds).
+strip_restricted() { # strip_restricted SRC DST "KEYS"
+  local key
+  cp "$1" "$2"
+  for key in $3; do
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$2" >/dev/null 2>&1 || true
+  done
 }
 
-# Unsigned build: ad-hoc sign the app inside-out with each target's
-# entitlements and the hardened runtime flag (as Xcode would have).
+# Unsigned build: ad-hoc sign the app inside-out (frameworks/dylibs, then the
+# File Provider .appex, then the app), each bundle with its target's resolved
+# entitlements and the hardened runtime flag, as Xcode would have.
 adhoc_sign_app() {
-  local app="$1" dir="$BUILD_DIR/adhoc-entitlements" entry rel ent n=0 item known
+  local app="$1" dir="$BUILD_DIR/adhoc-entitlements" item id ent
   rm -rf "$dir"
   mkdir -p "$dir"
+  strip_restricted "$TARGET_INFO_DIR/$APP_TARGET.entitlements" "$dir/app.entitlements" "$APP_RESTRICTED"
+  strip_restricted "$TARGET_INFO_DIR/$EXT_TARGET.entitlements" "$dir/ext.entitlements" "$EXT_RESTRICTED"
+
+  [[ -d "$app/Contents/PlugIns/$EXT_PRODUCT" ]] \
+    || die "Expected $EXT_PRODUCT in Contents/PlugIns. project.yml must embed $EXT_TARGET in the app (embed: true, PlugIns)."
+
   # Refuse nested code this script does not know how to sign.
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
-    known="no"
-    for entry in "${ADHOC_NESTED[@]}"; do
-      if [[ "${item#"$app"/}" == "${entry%%|*}" ]]; then known="yes"; fi
-    done
-    [[ "$known" == "yes" ]] || die "Unknown nested code ${item#"$app"/}: add it to ADHOC_NESTED in scripts/build-dmg.sh."
+    case "$item" in
+      "$app/Contents/PlugIns/$EXT_PRODUCT" | *.framework) ;;
+      *) die "Unknown nested code ${item#"$app"/}: teach adhoc_sign_app in scripts/build-dmg.sh about it." ;;
+    esac
   done < <(list_nested_code "$app")
-  for entry in "${ADHOC_NESTED[@]}"; do
-    rel="${entry%%|*}"
-    ent="$dir/$n.entitlements"
-    n=$((n + 1))
-    [[ -e "$app/$rel" ]] || die "Expected nested code $rel is missing from the app (embed phases in project.yml)."
-    resolve_entitlements "${entry#*|}" "$ent"
-    codesign --force --sign - --timestamp=none --options runtime --entitlements "$ent" "$app/$rel" \
-      || die "Ad-hoc signing $rel failed."
-  done
-  ent="$dir/app.entitlements"
-  resolve_entitlements "$ADHOC_APP_ENTITLEMENTS" "$ent"
-  codesign --force --sign - --timestamp=none --options runtime --entitlements "$ent" "$app" \
+
+  # Frameworks and dylibs anywhere, deepest first; no entitlements.
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    codesign --force --sign - --timestamp=none --options runtime "$item" \
+      || die "Ad-hoc signing ${item#"$app"/} failed."
+  done < <(find "$app/Contents" \( -name '*.framework' -o -name '*.dylib' \) -print | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2-)
+
+  item="$app/Contents/PlugIns/$EXT_PRODUCT"
+  id="$(plist_get "$item/Contents/Info.plist" CFBundleIdentifier || true)"
+  [[ "$id" == "$EXT_BUNDLE_ID" ]] || die "$EXT_PRODUCT has bundle ID '$id', expected $EXT_BUNDLE_ID."
+  ent="$dir/ext.entitlements"
+  codesign --force --sign - --timestamp=none --options runtime --entitlements "$ent" "$item" \
+    || die "Ad-hoc signing $EXT_PRODUCT failed."
+  codesign --force --sign - --timestamp=none --options runtime --entitlements "$dir/app.entitlements" "$app" \
     || die "Ad-hoc signing the app failed."
+}
+
+# Info.plist values the build injected; warn if project.yml does not map them.
+check_app_config() {
+  local plist="$1/Contents/Info.plist" key want got
+  local pair
+  for pair in "GoogleClientID|$GOOGLE_CLIENT_ID_MAC" "GoogleReversedClientID|$GOOGLE_REVERSED_CLIENT_ID" \
+    "DriveRootSharedDriveName|$DRIVE_ROOT_SHARED_DRIVE_NAME" "DriveRootFolderID|$DRIVE_ROOT_FOLDER_ID"; do
+    key="${pair%%|*}"
+    want="${pair#*|}"
+    if ! got="$(plist_get "$plist" "$key")"; then
+      warn "Info.plist has no $key key; project.yml should set it from the matching build setting."
+      continue
+    fi
+    log "Info.plist $key = ${got:-<empty>}"
+    if [[ -n "$want" && "$got" != "$want" ]]; then
+      die "Info.plist $key is '$got' but the build injected '$want'. Map it to the build setting in project.yml."
+    fi
+  done
+  log "Info.plist DriveAppGroup = $(plist_get "$plist" DriveAppGroup || echo '<missing>')"
 }
 
 export_app() {
@@ -685,9 +886,11 @@ export_app() {
     # Manual export signing needs a profile per bundle ID that had one at build time.
     /usr/libexec/PlistBuddy -c "Delete :provisioningProfiles" "$options" 2>/dev/null || true
     /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" "$options"
-    /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$APP_BUNDLE_ID$FS_BUNDLE_SUFFIX string $FS_PROFILE_UUID" "$options"
     if [[ -n "$APP_PROFILE_UUID" ]]; then
       /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$APP_BUNDLE_ID string $APP_PROFILE_UUID" "$options"
+    fi
+    if [[ -n "$EXT_PROFILE_UUID" ]]; then
+      /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$EXT_BUNDLE_ID string $EXT_PROFILE_UUID" "$options"
     fi
     run_xcodebuild export \
       -exportArchive \
@@ -696,6 +899,8 @@ export_app() {
       -exportOptionsPlist "$options"
     EXPORTED_APP="$EXPORT_DIR/$(basename "$app_rel")"
     [[ -d "$EXPORTED_APP" ]] || die "Export finished but $EXPORTED_APP is missing."
+    [[ -d "$EXPORTED_APP/Contents/PlugIns/$EXT_PRODUCT" ]] \
+      || die "Exported app has no Contents/PlugIns/$EXT_PRODUCT. project.yml must embed $EXT_TARGET."
     codesign --verify --deep --strict --verbose=2 "$EXPORTED_APP" || die "codesign verification failed for the exported app."
     local info
     info="$(codesign -dv --verbose=2 "$EXPORTED_APP" 2>&1)"
@@ -708,9 +913,15 @@ export_app() {
     ditto "$ARCHIVE_PATH/Products/$app_rel" "$EXPORTED_APP"
     adhoc_sign_app "$EXPORTED_APP"
     codesign --verify --deep --strict --verbose=2 "$EXPORTED_APP" || die "Ad-hoc signature of the app does not verify."
-    log "Unsigned build: the FSKit module claims a restricted entitlement without a profile, so macOS will not load it. Only the app itself is testable."
+    log "Unsigned build: no Team ID, so the App Group is not team-prefixed and macOS may ask the user to allow access to it; restricted entitlements were left out. Use it to check the pipeline and the UI, not File Provider behaviour."
   fi
   check_nested_signatures "$EXPORTED_APP"
+  local ent
+  for ent in "$EXPORTED_APP" "$EXPORTED_APP/Contents/PlugIns/$EXT_PRODUCT"; do
+    log "Entitlements of ${ent#"$EXPORT_DIR"/}:"
+    codesign -d --entitlements - --xml "$ent" 2>/dev/null | plutil -p - 2>/dev/null || true
+  done
+  check_app_config "$EXPORTED_APP"
   local short build
   short="$(plist_get "$EXPORTED_APP/Contents/Info.plist" CFBundleShortVersionString || true)"
   build="$(plist_get "$EXPORTED_APP/Contents/Info.plist" CFBundleVersion || true)"
@@ -805,6 +1016,7 @@ checksum() {
   summary "| Version | $VERSION (build $BUILD_NUMBER) |"
   summary "| Signed (Developer ID) | $SIGNED |"
   summary "| Notarised | $NOTARIZED |"
+  summary "| Google client ID set | $([[ -n "$GOOGLE_CLIENT_ID_MAC" ]] && echo yes || echo no) |"
   summary "| SHA-256 | \`$hash\` |"
   summary "| Xcode | $(basename "$XCODE_SELECTED") |"
   group_end
@@ -819,17 +1031,19 @@ publish_release() {
   ensure_release_absent
   local target="${GITHUB_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
   local notes="$BUILD_DIR/release-notes.md"
-  local title="$APP_NAME $VERSION (build $BUILD_NUMBER)"
+  local title="$APP_NAME $VERSION (build $BUILD_NUMBER) for macOS"
+  local min_os
+  min_os="$(plist_get "$EXPORTED_APP/Contents/Info.plist" LSMinimumSystemVersion || echo unknown)"
   [[ "$SIGNED" == "yes" ]] || title="$title, unsigned"
   {
-    printf 'Test build of %s %s (build %s) from commit %s.\n\n' "$APP_NAME" "$VERSION" "$BUILD_NUMBER" "$target"
+    printf 'Test build of %s %s (build %s) for macOS from commit %s.\n\n' "$APP_NAME" "$VERSION" "$BUILD_NUMBER" "$target"
     printf -- '- Developer ID signed: %s\n- Notarised: %s\n' "$SIGNED" "$NOTARIZED"
-    printf -- '- Built with %s on macOS %s, arm64 only. Requires macOS 26 or later.\n' \
-      "$(basename "$XCODE_SELECTED" .app)" "$(sw_vers -productVersion)"
+    printf -- '- Built with %s on macOS %s, Apple Silicon (arm64) only. Requires macOS %s or later.\n' \
+      "$(basename "$XCODE_SELECTED" .app)" "$(sw_vers -productVersion)" "$min_os"
     printf -- "- SHA-256: \`%s\`\n\n" "$(awk '{ print $1 }' "$SHA_PATH")"
     printf "Verify: \`shasum -a 256 -c %s\` in the download folder.\n\n" "$DMG_NAME.sha256"
     if [[ "$SIGNED" != "yes" ]]; then
-      printf 'This DMG is NOT signed or notarised. macOS will block the first launch: see docs/12-pipeline-usage.md ("Opening an unsigned build").\n'
+      printf 'This DMG is NOT signed or notarised. macOS will block the first launch: see docs/12-pipeline-usage.md ("Opening an unsigned build"). The Finder integration (File Provider) and keychain sharing need a signed build.\n'
     elif [[ "$NOTARIZED" != "yes" ]]; then
       printf 'Signed but NOT notarised. Gatekeeper will block the first launch on other Macs.\n'
     fi
@@ -898,6 +1112,7 @@ build() {
   preflight
   select_xcode
   generate_project
+  inspect_targets
   setup_signing
   archive
   export_app

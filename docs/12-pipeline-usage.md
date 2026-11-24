@@ -1,267 +1,432 @@
-# DMG pipeline: usage
+# Build pipelines: usage
 
-Draft v0.1 | 16 November 2026 | How to add secrets, run the build and install the DMG
+Draft v0.2 | 24 November 2026 | How to add secrets and variables, run the Mac and Windows builds, and install the results
 
-The **Build DMG** workflow builds the Mac app on a GitHub-hosted macOS runner, packages it as a DMG and attaches the DMG to a **draft pre-release**. It runs only when you start it by hand. Nothing in this repo has run it yet (see [What is verified](#what-is-verified-and-what-is-not)).
+This repo has three GitHub Actions workflows:
+
+| Workflow | Trigger | Runner | Output |
+| --- | --- | --- | --- |
+| **Build DMG** (`.github/workflows/build-dmg.yml`) | Manual only | `macos-26` | Draft pre-release `v<version>-b<build>` with `DriveApp-<version>-<build>[-unsigned].dmg` and its `.sha256` |
+| **Build Windows** (`.github/workflows/build-windows.yml`) | Manual only | `windows-2025` | Draft pre-release `win-v<version>-b<build>` with installer and portable zip for `win-x64` and `win-arm64`, each with a `.sha256` |
+| **Core tests** (`.github/workflows/core-tests.yml`) | Pull requests that touch `Packages/DriveCore/**`, `windows/**`, `spec/**` or the workflow itself; also manual | `ubuntu-24.04` | Test results in the run log only |
+
+Nothing in this repo has run any of them yet. See [What is verified](#9-what-is-verified-and-what-is-not).
 
 | File | Role |
 | --- | --- |
-| `.github/workflows/build-dmg.yml` | Manual trigger, runner, secrets. Calls the script. |
-| `scripts/build-dmg.sh` | All build logic. Run `scripts/build-dmg.sh --help`. |
-| `scripts/ExportOptions.plist` | Developer ID export options (team ID and provisioning profiles injected at build time). |
-| `project.yml` | XcodeGen spec. The `.xcodeproj` is generated on the runner, never committed. |
-| `App/` | Placeholder menu-bar app that shows its version. |
+| `scripts/build-dmg.sh` | All Mac build logic. Run `scripts/build-dmg.sh --help`. |
+| `scripts/ExportOptions.plist` | Developer ID export options. The script adds the team ID and provisioning profiles at build time. |
+| `scripts/build-windows.ps1` | All Windows build logic (PowerShell 7). Run `pwsh scripts/build-windows.ps1 help`. |
+| `scripts/windows/DriveApp.iss` | Inno Setup script for the Windows installer. |
 | `.github/actionlint.yaml` | Tells actionlint 1.7.7 that `macos-26` is a valid runner label. |
 
-## 1. What the pipeline does
+The rules from the original brief (`11-dmg-pipeline-brief.md`) apply to both build workflows:
 
-1. Runs on `macos-26` (macOS 26, Apple Silicon), with a 30-minute timeout. Only one build runs at a time.
-2. Picks the newest `/Applications/Xcode_26*.app` (override with the `XCODE_APP` environment variable) and prints `xcodebuild -version`.
-3. Installs XcodeGen with Homebrew and generates `DriveApp.xcodeproj` from `project.yml`.
-4. If signing secrets exist, imports the Developer ID certificate into a temporary keychain and installs the Developer ID provisioning profile(s) after checking them against the certificate, team and bundle IDs. If they don't, the build is unsigned.
-5. Runs `xcodebuild archive` (Release, arm64 only, version and build number from the inputs). For signed builds it then runs `-exportArchive` with `ExportOptions.plist`. For unsigned builds Xcode builds with `CODE_SIGNING_ALLOWED=NO`; the script copies the `.app` out of the archive and ad-hoc signs it inside-out (StorageService tool, FSKit `.appex`, then the app), each with its own entitlements and the hardened runtime flag.
-6. Creates the DMG with `hdiutil` (UDZO). The DMG contains the app and an `Applications` shortcut. Signed builds also sign the DMG.
-7. Notarises and staples the DMG, but only if the App Store Connect key secrets exist and the build is signed. Otherwise the log says `Notarisation skipped: …`.
-8. Writes `<dmg>.sha256`, prints it and adds it to the run summary.
-9. Creates the draft pre-release `v<version>-b<build>` and attaches the DMG and `.sha256`. The run fails early if that release or tag already exists.
-10. Always deletes the temporary keychain, decoded key files and the profiles it installed, even if the build fails.
+- They run only when you start them (`workflow_dispatch` with `version` and `build_number` inputs).
+- Installers are **draft pre-release assets**, never `actions/upload-artifact` (artifacts count toward the Actions storage quota).
+- Runner images and actions are pinned.
+- Every secret is optional. Without secrets you get an unsigned build, and the run still succeeds. Each skipped step prints why.
+- A cleanup step always runs. Each workflow allows one run at a time and has a timeout.
 
-DMG names:
+## 1. What the pipelines do
 
-| Build | DMG name |
+### Build DMG (macOS)
+
+1. Runs on `macos-26` (macOS 26, Apple Silicon). Timeout 30 minutes.
+2. Picks the newest `/Applications/Xcode_26*.app` (or `XCODE_APP`) and generates `DriveApp.xcodeproj` from `project.yml` with XcodeGen.
+3. Reads the real build settings of the two targets, **`DriveApp`** (sandboxed menu-bar app) and **`DriveAppFileProvider`** (File Provider app extension in `Contents/PlugIns`, bundle ID `<APP_BUNDLE_ID>.fileprovider`). It resolves each target's entitlements and lists any *restricted* entitlements (see §2.3).
+4. Signed builds: imports the Developer ID certificate into a temporary keychain and installs any provisioning profiles you supplied, after checking each one. Unsigned builds skip this.
+5. Runs `xcodebuild archive` (Release, arm64, version and build from the inputs). The Google configuration from the repository variables goes in as build settings (`GOOGLE_CLIENT_ID_MAC=…` and so on; see §2.1).
+   - **Signed:** Xcode signs the extension and then the app. The script then runs `-exportArchive`.
+   - **Unsigned:** Xcode builds with `CODE_SIGNING_ALLOWED=NO`. The script copies the app and ad-hoc signs it inside-out with each target's resolved entitlements and the hardened runtime: frameworks first, then `DriveAppFileProvider.appex`, then the app.
+6. Checks the result:
+   - every nested signature;
+   - that `GoogleClientID`, `GoogleReversedClientID`, `DriveRootSharedDriveName` and `DriveRootFolderID` in the app's Info.plist match the injected values;
+   - the version and build number.
+7. Builds the DMG with `hdiutil` (UDZO, with an `Applications` shortcut). Signed builds also sign the DMG.
+8. Notarises and staples the DMG if the build is signed and the App Store Connect key is set.
+9. Writes the `.sha256`, creates the draft pre-release `v<version>-b<build>` and attaches both files. The run fails early if that release or tag already exists.
+10. Always deletes the temporary keychain, decoded keys and the profiles it installed.
+
+### Build Windows
+
+1. Runs on `windows-2025`. Timeout 45 minutes. Installs the .NET 10 SDK with `actions/setup-dotnet`.
+2. **Preflight:** checks the inputs (the build number must be ≤ 65535, because Windows file versions use 16-bit parts) and the configuration. It finds Inno Setup (preinstalled on the image; otherwise it runs `choco install innosetup --version 6.7.1`) and checks that the draft release does not exist yet.
+3. Restores and runs `windows/tests/DriveSync.Core.Tests`.
+4. For **`win-x64`** and **`win-arm64`**:
+   1. `dotnet publish windows/src/DriveSync.App` self-contained, with `-p:Version=<version> -p:FileVersion=<numeric version>.<build>`. `AssemblyVersion` and `InformationalVersion` are set too.
+   2. Writes the configuration into the **published** `appsettings.json`: `Google:ClientId`, `Google:ClientSecret`, `Drive:SharedDriveName` and `Drive:FolderId` (see §2.1). The secret is masked in the log and never printed.
+   3. **Signed:** signs our own binaries (the app `.exe` and the `DriveSync*.dll` files that are not signed yet) with `signtool /fd SHA256 /tr http://timestamp.digicert.com /td SHA256`, then verifies them.
+   4. Zips the folder into `DriveApp-<version>-<build>-<rid>-portable[-unsigned].zip`.
+   5. Compiles `scripts/windows/DriveApp.iss` into `DriveApp-<version>-<build>-<rid>-setup[-unsigned].exe`. Signed builds have Inno Setup sign both the setup and the uninstaller it embeds.
+5. Writes a `.sha256` file for each asset (`<hash>  <file>` format) and adds the hashes to the run summary.
+6. Creates the draft pre-release `win-v<version>-b<build>` with the 4 assets and 4 `.sha256` files. The `win-` prefix keeps Windows tags separate from the Mac tags (`v…`), so both platforms can use the same version and build number.
+7. Always removes the imported certificate (and its key) from the runner's user store and deletes the decoded `.pfx`.
+
+The installer:
+
+- Installs **per user without admin rights** into `%LOCALAPPDATA%\Programs\DriveApp`.
+- Adds a Start Menu shortcut and offers *Start DriveApp when I sign in to Windows* (an `HKCU\…\Run` value, checked by default).
+- Runs on Windows 10 2004 (build 19041) or later.
+- On uninstall, stops the app (`taskkill`), runs `DriveSync.App.exe --unregister` to remove the Cloud Files sync root and the Explorer entry, then deletes the files.
+
+### Core tests
+
+| Job | What it runs |
 | --- | --- |
-| Signed (Developer ID) | `DriveApp-<version>-<build>.dmg` |
-| No signing secrets | `DriveApp-<version>-<build>-unsigned.dmg` |
+| `swift` | `swift build` and `swift test` for `Packages/DriveCore`, in the `swift:6.2.4-noble` container (pinned by digest). |
+| `dotnet` | Builds the solution in `windows/` with `EnableWindowsTargeting=true`, then runs `dotnet test` on `DriveSync.Core.Tests`. |
 
-The name comes from `APP_NAME` in `project.yml`. If you rename the app there, the DMG, volume and release title follow.
+Both jobs have read-only permissions and a 20-minute timeout. A newer push to the same pull request cancels the older run.
 
-## 2. Add the secrets (all optional)
+## 2. Secrets and variables
 
-Without any secrets the workflow still succeeds and produces an **unsigned** DMG. Add secrets in *GitHub › repo › Settings › Secrets and variables › Actions › New repository secret*, or with `gh secret set` from a Mac that is logged in to `gh` for this repo.
+Add them in *GitHub › repo › Settings › Secrets and variables › Actions*: the **Secrets** tab for secrets, the **Variables** tab for variables. Or use `gh secret set NAME` / `gh variable set NAME` from a clone. Every one is optional.
 
-| Secret | What it is | Needed for |
+### 2.1 Variables (not secret; they ship inside the apps)
+
+| Variable | Used by | Value |
 | --- | --- | --- |
-| `MACOS_CERT_P12_BASE64` | Developer ID Application certificate **with its private key**, exported as `.p12`, base64-encoded | Signing |
-| `MACOS_CERT_PASSWORD` | Password you set when exporting the `.p12` | Signing |
-| `APPLE_TEAM_ID` | 10-character team ID | Signing (required if the `.p12` is set) |
-| `MACOS_PROFILE_FSEXT_BASE64` | Developer ID provisioning profile for the FSKit module (`<APP_BUNDLE_ID>.fsext`) with the **FSKit Module** capability, base64-encoded | Signing (**required** if the `.p12` is set) |
-| `MACOS_PROFILE_APP_BASE64` | Developer ID provisioning profile for the app (`<APP_BUNDLE_ID>`), base64-encoded | Signing (optional; see below) |
-| `KEYCHAIN_PASSWORD` | Any long random string for the temporary CI keychain. If missing, the script generates one. | Signing (optional) |
-| `ASC_KEY_ID` | App Store Connect API key ID | Notarisation |
-| `ASC_ISSUER_ID` | App Store Connect issuer ID (a UUID) | Notarisation |
-| `ASC_KEY_P8_BASE64` | The `AuthKey_<KEYID>.p8` file, base64-encoded | Notarisation |
+| `GOOGLE_CLIENT_ID_MAC` | Mac | Client ID of the Google OAuth client of type **iOS**, bound to bundle ID `com.wakeupmonster.driveapp.dev`. Looks like `1234567890-abc….apps.googleusercontent.com`. |
+| `GOOGLE_REVERSED_CLIENT_ID` | Mac | `com.googleusercontent.apps.1234567890-abc…`. If empty, the script derives it from `GOOGLE_CLIENT_ID_MAC`. If set, it must match, or the run stops. |
+| `GOOGLE_CLIENT_ID_WINDOWS` | Windows | Client ID of the Google OAuth client of type **Desktop app**. |
+| `DRIVE_ROOT_SHARED_DRIVE_NAME` | both | Shared drive to show. Default `WakeupMonster`. |
+| `DRIVE_ROOT_FOLDER_ID` | both | Optional folder ID. If set, it takes precedence over the shared drive name. |
 
-Notarisation needs signing. If the ASC secrets are set but the `.p12` is not, notarisation is skipped with a log line.
+If a variable is empty, the run prints a **warning** and still succeeds. The app builds with the empty default and reports "not configured" at sign-in.
 
-### Developer ID certificate (`.p12`)
+How each platform gets the values:
 
-Needs a paid Apple Developer Program membership. The Account Holder creates the Developer ID Application certificate.
+- **Mac:** passed to `xcodebuild` as build settings. `project.yml` maps them to the Info.plist keys `GoogleClientID`, `GoogleReversedClientID`, `DriveRootSharedDriveName` and `DriveRootFolderID`.
+- **Windows:** written into the published `appsettings.json`.
 
-1. On the Mac that has the certificate, open **Keychain Access › login › My Certificates**.
-2. Find **Developer ID Application: <name> (<TEAMID>)**. Expand it and check that a private key is underneath.
-3. Right-click it, choose **Export**, pick **Personal Information Exchange (.p12)** and set a strong password.
-4. Base64-encode it and copy the result to the clipboard:
-
-   ```sh
-   base64 -i DeveloperID.p12 | pbcopy
-   ```
-
-5. Paste it as `MACOS_CERT_P12_BASE64`, and put the export password in `MACOS_CERT_PASSWORD`.
-6. Delete the `.p12` file afterwards (it is git-ignored, but don't leave it lying around).
-
-Team ID: *developer.apple.com › Account › Membership details › Team ID*.
-
-### Developer ID provisioning profiles (`.provisionprofile`)
-
-The FSKit module claims `com.apple.developer.fskit.fsmodule`. That is a *restricted* entitlement: on macOS it must be authorised by a provisioning profile embedded in the `.appex`, or the module will not run ([TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles)). Apple's [macOS capability table](https://developer.apple.com/help/account/reference/supported-capabilities-macos) lists FSKit Module as available for Developer ID. So a signed build needs `MACOS_PROFILE_FSEXT_BASE64`. If the `.p12` is set and this secret is not, the run **stops in preflight** with a clear error instead of failing 10 minutes later in Xcode, or producing a signed DMG whose file system can never load. Remove `MACOS_CERT_P12_BASE64` if you want an unsigned build.
-
-The app and the StorageService tool claim only the App Sandbox and a team-prefixed App Group (`<TEAMID>.<APP_BUNDLE_ID>`). TN3125 lists `com.apple.security.application-groups` as unrestricted on macOS, and the [App Groups entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.application-groups) page says team-prefixed macOS groups need no registration. So the app needs no profile, and the tool cannot carry one (TN3125: a standalone executable has nowhere to embed it). `MACOS_PROFILE_APP_BASE64` is there in case Xcode or a later entitlement asks for an app profile (G0-VERIFY).
-
-Create the FSKit module profile (Account Holder or Admin):
-
-1. *developer.apple.com › Certificates, IDs & Profiles › Identifiers*: register an explicit App ID `<APP_BUNDLE_ID>.fsext` (today `com.wakeupmonster.driveapp.dev.fsext`). Enable **FSKit Module**. Also enable **App Groups** if you plan to list the group there.
-2. *Profiles › +*: choose **Distribution › Developer ID**, pick that App ID and the **same Developer ID Application certificate** that is in the `.p12`. Name it, e.g. `DriveApp FSKit Developer ID`, and download it.
-3. Base64-encode it into the secret:
-
-   ```sh
-   base64 -i DriveApp_FSKit_Developer_ID.provisionprofile | gh secret set MACOS_PROFILE_FSEXT_BASE64
-   ```
-
-For an optional app profile, repeat with the App ID `<APP_BUNDLE_ID>` and store it as `MACOS_PROFILE_APP_BASE64`.
-
-Before the build, the script decodes each profile (`security cms -D`) and stops if the team is not `APPLE_TEAM_ID`, the App ID is not `<TEAMID>.<bundle ID>`, it is not a Developer ID profile (`ProvisionsAllDevices`), it has expired, it lacks the imported certificate, or (FSKit profile) it does not authorise `com.apple.developer.fskit.fsmodule`. It installs the profiles as `<UUID>.provisionprofile` in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (Xcode 16 and later) and `~/Library/MobileDevice/Provisioning Profiles` (older tools), passes their UUIDs to the matching targets (`DRIVEAPP_FS_PROFILE` / `DRIVEAPP_APP_PROFILE` in `project.yml`, mapped to `PROVISIONING_PROFILE_SPECIFIER`), adds them to the export options' `provisioningProfiles`, and deletes the files it installed during cleanup.
-
-### App Store Connect API key (`.p8`)
-
-1. *App Store Connect › Users and Access › Integrations › App Store Connect API › Team Keys*. Create a key with the **Developer** role.
-2. Note the **Key ID** (`ASC_KEY_ID`) and the **Issuer ID** shown above the list (`ASC_ISSUER_ID`).
-3. Download `AuthKey_<KEYID>.p8`. Apple lets you download it only once.
-4. Base64-encode it:
-
-   ```sh
-   base64 -i AuthKey_ABC123DEFG.p8 | pbcopy
-   ```
-
-5. Paste it as `ASC_KEY_P8_BASE64`. Store the `.p8` in a password manager and delete the loose file.
-
-### Alternative: `gh secret set`
-
-Run these on the Mac, in a clone of this repo. Each value is read from stdin, so it never appears in your shell history:
+The Google Cloud setup is in `docs/15-google-cloud-setup.md`.
 
 ```sh
-base64 -i DeveloperID.p12   | gh secret set MACOS_CERT_P12_BASE64
-gh secret set MACOS_CERT_PASSWORD          # prompts for the value
-gh secret set APPLE_TEAM_ID                # prompts
-base64 -i DriveApp_FSKit_Developer_ID.provisionprofile | gh secret set MACOS_PROFILE_FSEXT_BASE64
-openssl rand -base64 32     | gh secret set KEYCHAIN_PASSWORD
-gh secret set ASC_KEY_ID                   # prompts
-gh secret set ASC_ISSUER_ID                # prompts
+gh variable set GOOGLE_CLIENT_ID_MAC --body "1234567890-abc.apps.googleusercontent.com"
+gh variable set GOOGLE_CLIENT_ID_WINDOWS --body "1234567890-def.apps.googleusercontent.com"
+gh variable set DRIVE_ROOT_SHARED_DRIVE_NAME --body "WakeupMonster"
+```
+
+### 2.2 Secrets
+
+| Secret | Platform | What it is | Needed for |
+| --- | --- | --- | --- |
+| `MACOS_CERT_P12_BASE64` | Mac | Developer ID Application certificate **with its private key** (`.p12`), base64 | Signing (turns it on) |
+| `MACOS_CERT_PASSWORD` | Mac | Password of the `.p12` | Signing |
+| `APPLE_TEAM_ID` | Mac | 10-character team ID | Signing (required if the `.p12` is set) |
+| `KEYCHAIN_PASSWORD` | Mac | Any long random string for the temporary keychain; generated if missing | Signing (optional) |
+| `MACOS_PROFILE_APP_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev`, base64 | Signing, if `DriveApp` claims a restricted entitlement (§2.3) |
+| `MACOS_PROFILE_EXT_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev.fileprovider`, base64 | Signing, if `DriveAppFileProvider` claims a restricted entitlement (§2.3) |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8_BASE64` | Mac | App Store Connect API key (Developer role); the `.p8` base64 | Notarisation |
+| `WINDOWS_CERT_PFX_BASE64` | Windows | Code-signing certificate with private key (`.pfx`), base64 | Authenticode signing (turns it on) |
+| `WINDOWS_CERT_PASSWORD` | Windows | Password of the `.pfx` | Authenticode signing |
+| `GOOGLE_CLIENT_SECRET_WINDOWS` | Windows | Client secret of the Google **Desktop app** client | Google sign-in on Windows |
+
+About `GOOGLE_CLIENT_SECRET_WINDOWS`:
+
+- Google documents installed-app ("Desktop app") client secrets as **not confidential**, and the value ends up in `appsettings.json` inside the installer and the zip.
+- It is still stored as a secret, so it stays out of the repo and is masked in logs.
+- The Mac uses an iOS-type client, which has no secret.
+
+Encode files on a Mac (`base64 -i file | pbcopy`) or in PowerShell (`[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx")) | Set-Clipboard`). Or pipe them straight in, so nothing lands in your shell history:
+
+```sh
+base64 -i DeveloperID.p12 | gh secret set MACOS_CERT_P12_BASE64
+gh secret set MACOS_CERT_PASSWORD            # prompts
+gh secret set APPLE_TEAM_ID                  # prompts
+openssl rand -base64 32 | gh secret set KEYCHAIN_PASSWORD
+base64 -i DriveApp_App_DeveloperID.provisionprofile | gh secret set MACOS_PROFILE_APP_BASE64
+base64 -i DriveApp_FileProvider_DeveloperID.provisionprofile | gh secret set MACOS_PROFILE_EXT_BASE64
+gh secret set ASC_KEY_ID                     # prompts
+gh secret set ASC_ISSUER_ID                  # prompts
 base64 -i AuthKey_ABC123DEFG.p8 | gh secret set ASC_KEY_P8_BASE64
-gh secret list                             # names only; values are never shown
+base64 -i codesign.pfx | gh secret set WINDOWS_CERT_PFX_BASE64
+gh secret set WINDOWS_CERT_PASSWORD          # prompts
+gh secret set GOOGLE_CLIENT_SECRET_WINDOWS   # prompts
+gh secret list                               # names only
 ```
 
-Secrets reach only the build step, through `env:`. The script never prints them and never uses `set -x`. GitHub masks secret values in logs, and the script masks the generated keychain password too.
+Secrets reach only the build step, through `env:`. The scripts never print them, never trace commands, and mask derived values (the keychain password, the Google client secret).
 
-## 3. Run the workflow
+### 2.3 Mac: do I need provisioning profiles?
 
-**Web:** *Actions › Build DMG › Run workflow*. Pick the branch, then fill in:
+The answer depends on the entitlements the Mac targets claim, so the script decides for each target:
 
-- `version`: e.g. `0.0.1`. Format `MAJOR.MINOR.PATCH`, optionally with a pre-release suffix such as `0.1.0-beta.1`. The app's `CFBundleShortVersionString` gets the numeric part only (`0.1.0`).
-- `build_number`: digits only, e.g. `1`. Becomes `CFBundleVersion`. Use a new number for every run; the run fails if release `v<version>-b<build>` already exists.
+| Entitlement | Profile needed under Developer ID? | Source |
+| --- | --- | --- |
+| App Sandbox, network client, user-selected files (`com.apple.security.*`) | No | [TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles): unrestricted on macOS |
+| App Groups `com.apple.security.application-groups` with a **team-prefixed** ID (`<TEAMID>.com.wakeupmonster.driveapp.dev`) | No (unrestricted). A profile still makes the claim "validated". | TN3125; Quinn, [App Groups: macOS vs iOS](https://developer.apple.com/forums/thread/721701). macOS 15+ only skips the "access data from other apps" prompt if the ID starts with your Team ID or a profile authorises it. |
+| File Provider extension point (`com.apple.fileprovider-nonui`) | No. It is an extension point, not an entitlement. Only *FileProvider Testing Mode* is a capability, and that one is development-only. | [Supported capabilities (macOS)](https://developer.apple.com/help/account/reference/supported-capabilities-macos) |
+| **Keychain sharing / data protection keychain**: `keychain-access-groups`, or relying on `com.apple.application-identifier` | **Yes, for every process that uses it** (app *and* extension) | [TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains): the entitlements that define data protection keychain access groups "must be authorized by a provisioning profile". Quinn ([forum 826107](https://developer.apple.com/forums/thread/826107)): Developer ID apps can use the data protection keychain with a profile; groups must be Team-ID-prefixed. |
 
-**CLI** (documented here; it has not been run):
+So if the app and the extension share OAuth tokens through the data protection keychain (`keychain-access-groups`), a signed build needs **both** profiles. If neither target claims a restricted entitlement, no profile is needed.
+
+What the script does:
+
+- **Signed build:** it lists the restricted keys for each target. If a target has one and its profile secret is missing, the run **stops** with a message that names the target and the secret. That is faster than waiting for Xcode's "requires a provisioning profile", or for a DMG whose app macOS refuses to launch.
+- **Each supplied profile is checked.** The run stops if:
+  - the team is not `APPLE_TEAM_ID`;
+  - the App ID is not `<TEAMID>.<bundle ID>`;
+  - it is not a Developer ID profile (`ProvisionsAllDevices`);
+  - it has expired;
+  - it does not contain the imported certificate;
+  - it does not list each restricted entitlement the target claims.
+- **Installing the profiles:**
+  1. Copies each profile to `~/Library/Developer/Xcode/UserData/Provisioning Profiles` and `~/Library/MobileDevice/Provisioning Profiles` as `<UUID>.provisionprofile`.
+  2. Passes the UUIDs to `xcodebuild` as `DRIVEAPP_APP_PROFILE` and `DRIVEAPP_EXT_PROFILE`. `project.yml` maps these to each target's `PROVISIONING_PROFILE_SPECIFIER`. There is no global `PROVISIONING_PROFILE_SPECIFIER`, because it would also reach the Swift package targets.
+  3. Adds the profiles to the export options' `provisioningProfiles`.
+  4. Deletes the files again in cleanup.
+- **Unsigned build:** restricted entitlements cannot be authorised, and macOS refuses to launch an ad-hoc-signed program that claims them. So the ad-hoc signature **leaves them out**, and the log warns about it. The unsigned app and extension then have no shared keychain access group (see §6).
+
+To create the profiles (Account Holder or Admin), on *developer.apple.com › Certificates, IDs & Profiles*:
+
+1. **Identifiers:** register two explicit App IDs:
+   - `com.wakeupmonster.driveapp.dev`
+   - `com.wakeupmonster.driveapp.dev.fileprovider`
+
+   Enable **App Groups** and, if the app shares the keychain, **Keychain Sharing** on both. Since June 2025, Mac profiles for an App ID with App Groups automatically authorise `TEAMID.*` groups (Quinn, forum 721701).
+2. **Profiles › +:** choose **Distribution › Developer ID**, then the App ID and the same Developer ID Application certificate that is in the `.p12`. Do this once for each App ID, and download both profiles.
+3. Store them as `MACOS_PROFILE_APP_BASE64` and `MACOS_PROFILE_EXT_BASE64` (commands in §2.2).
+
+**G0-VERIFY:** this is based on Apple's documentation and forum answers. It has not been checked against a real signed build of this project.
+
+### 2.4 Mac certificate and notarisation key
+
+- **Developer ID Application `.p12`** (needs a paid Apple Developer Program membership):
+  1. In Keychain Access › login › My Certificates, find *Developer ID Application: … (TEAMID)* and check that it has a private key.
+  2. Export it as `.p12` with a strong password.
+  3. Base64-encode it into `MACOS_CERT_P12_BASE64`, and delete the loose file.
+
+  The Team ID is under *developer.apple.com › Account › Membership details*.
+- **App Store Connect API key:**
+  1. Create a key with the Developer role in *App Store Connect › Users and Access › Integrations › App Store Connect API › Team Keys*.
+  2. Note the Key ID and the Issuer ID.
+  3. Download `AuthKey_<KEYID>.p8`. Apple lets you download it only once.
+
+### 2.5 Windows code signing
+
+**Option A: a `.pfx` (implemented).**
+
+You need an OV or EV code-signing certificate from a CA, exported with its private key as `.pfx`. Set `WINDOWS_CERT_PFX_BASE64` and `WINDOWS_CERT_PASSWORD`. The script:
+
+1. Imports it into the runner's `CurrentUser\My` store.
+2. Checks that it has a private key and the Code Signing EKU, and that it has not expired.
+3. Signs by thumbprint (so the password is not on a command line), with the Windows SDK `signtool.exe`.
+4. Removes the certificate again in cleanup.
+
+Since 2023, CAs issue new OV/EV certificates only on hardware tokens or cloud HSMs. A plain `.pfx` is therefore only possible with an older certificate, or with a CA that offers a cloud-HSM export. Most new certificates need Option B or the CA's own signing tool.
+
+**Option B: Azure Artifact Signing, formerly Trusted Signing (recommended; not implemented).**
+
+Microsoft's managed signing service: about USD 10 a month, no certificate file, and the signatures build SmartScreen reputation. Limits:
+
+- Organisations must have 3+ years of verifiable history.
+- Individual developers are limited to the US and Canada ([quickstart](https://learn.microsoft.com/azure/artifact-signing/quickstart)).
+
+To adopt it:
+
+1. Create an Artifact Signing account and a certificate profile.
+2. Give a Microsoft Entra app registration the *Artifact Signing Certificate Profile Signer* role.
+3. Add a step before packaging that uses `Azure/artifact-signing-action` (v2.0.0, commit `c7ab2a863ab5f9a846ddb8265964877ef296ee82`) with OIDC (`azure/login`) or a client secret.
+4. Change `scripts/build-windows.ps1` to call it instead of `signtool /sha1` (or `signtool /dlib`).
+
+That is a small change, but it can't be tested without an account, so it is not in the workflow yet.
+
+## 3. Run the workflows
+
+Both build workflows take the same inputs:
+
+| Input | Format | Notes |
+| --- | --- | --- |
+| `version` | `MAJOR.MINOR.PATCH`, optionally `-pre` (e.g. `0.1.0-beta.1`) | Mac `CFBundleShortVersionString` and the Windows `FileVersion` get only the numeric part. |
+| `build_number` | Digits only (e.g. `1`) | Use a new number for every run. Windows allows at most 65535. |
+
+**Web:** *Actions › Build DMG* (or *Build Windows*) › *Run workflow*. Pick the branch and fill in both inputs.
+
+**CLI** (documented; not run from this repo):
 
 ```sh
-gh workflow run build-dmg.yml -f version=0.0.1 -f build_number=1
-gh run watch          # follow the run
+gh workflow run build-dmg.yml     -f version=0.1.0 -f build_number=1
+gh workflow run build-windows.yml -f version=0.1.0 -f build_number=1
+gh workflow run core-tests.yml    # tests on demand
+gh run watch
 ```
 
-If you start a second run while one is running, it waits. GitHub keeps at most one waiting run per concurrency group, so starting a third run cancels the second (the one still waiting).
+A second run of the same build workflow waits for the first. GitHub keeps only one waiting run per group, so a third run cancels the waiting second one.
 
-### Build on a Mac without CI
+Local builds:
 
-The same script works on a Mac with Xcode 26 installed. It doesn't publish a release by default when run outside Actions:
+- **Mac:**
+
+  ```sh
+  VERSION=0.1.0 BUILD_NUMBER=1 scripts/build-dmg.sh build
+  ```
+
+  It does not publish outside Actions; the DMG is in `build/dist/`.
+- **Windows** (PowerShell 7, .NET 10 SDK, Inno Setup 6):
+
+  ```powershell
+  pwsh scripts/build-windows.ps1 build -Version 0.1.0 -BuildNumber 1
+  ```
+
+  The output is in `build\windows\dist\`.
+- **On Linux:**
+  - `build-dmg.sh build` stops after the input checks with exit code 3.
+  - `build-windows.ps1 build` also stops with exit code 3. `-NoInstaller` runs restore, tests, both self-contained publishes and the zips, without signing or an installer. Use it as a smoke test.
+
+## 4. Where the files appear
+
+*GitHub › repo › Releases.* Each run creates a **draft pre-release**:
+
+| Platform | Tag | Title | Assets |
+| --- | --- | --- | --- |
+| Mac | `v<version>-b<build>` | `DriveApp <version> (build <n>) for macOS` | DMG and `.sha256` |
+| Windows | `win-v<version>-b<build>` | `DriveApp <version> (build <n>) for Windows` | 2 installers, 2 zips and 4 `.sha256` files |
+
+- Only people with write access can see drafts. The tag is created only when someone publishes the draft.
+- Release assets do not count toward the Actions storage quota. Delete old drafts when you no longer need them.
+- The run summary shows the file names, SHA-256 hashes, and whether the build was signed and whether a Google client ID was set.
+
+## 5. Verify a download
 
 ```sh
-VERSION=0.0.1 BUILD_NUMBER=1 scripts/build-dmg.sh build
-# DMG: build/dist/DriveApp-0.0.1-1-unsigned.dmg
+shasum -a 256 -c DriveApp-0.1.0-1.dmg.sha256                       # macOS
+sha256sum -c DriveApp-0.1.0-1-win-x64-setup-unsigned.exe.sha256     # Linux / Git Bash
 ```
 
-On Linux, `scripts/build-dmg.sh build` stops after checking the inputs with "This build needs macOS with Xcode 26 (found Linux)" (exit code 3).
-
-## 4. Where the DMG appears
-
-*GitHub › repo › Releases*. The release is a **draft pre-release** named `DriveApp <version> (build <n>)`, with tag `v<version>-b<build>`. It has two assets: the DMG and `<dmg>.sha256`. The run summary page also shows the file name, SHA-256, and whether it was signed and notarised.
-
-- Drafts are visible only to people with write access to the repo. The tag is created only when someone publishes the draft.
-- The DMG is a Release asset, **not** an Actions artifact. Release assets don't count toward Actions storage (see `10-repo-ci-and-test-builds.md` §1). Delete old drafts when you no longer need them.
-
-## 5. Verify the download
-
-In the folder with both files:
-
-```sh
-shasum -a 256 -c DriveApp-0.0.1-1.dmg.sha256
-# DriveApp-0.0.1-1.dmg: OK
+```powershell
+(Get-FileHash .\DriveApp-0.1.0-1-win-x64-setup-unsigned.exe -Algorithm SHA256).Hash   # compare with the .sha256
+Get-AuthenticodeSignature .\DriveApp-0.1.0-1-win-x64-setup.exe                          # signed builds: Status Valid
 ```
 
-For a signed, notarised DMG you can also check:
+For a signed, notarised DMG: `xcrun stapler validate <dmg>` and `spctl --assess --type open --context context:primary-signature -vv <dmg>`.
 
-```sh
-xcrun stapler validate DriveApp-0.0.1-1.dmg
-spctl --assess --type open --context context:primary-signature -vv DriveApp-0.0.1-1.dmg
-codesign -dv --verbose=2 /Applications/DriveApp.app      # after copying the app
-```
+## 6. Opening an unsigned build
 
-## 6. Opening an unsigned build (macOS 26)
+### macOS (unsigned DMG, ad-hoc signed, not notarised)
 
-Unsigned DMGs are ad-hoc signed only, and they are not notarised. Gatekeeper blocks the first launch of a downloaded copy with a message that Apple could not verify the app.
+Gatekeeper blocks the first launch. On macOS 15 and later, right-click › Open no longer gets past it. Instead:
 
-- **macOS 15 and later, including macOS 26:** Control-click (right-click) › **Open** no longer bypasses Gatekeeper for apps that aren't notarised. It shows the same block. Do this instead:
-  1. Copy `DriveApp.app` from the DMG to `/Applications` and try to open it once. Dismiss the warning.
-  2. Open **System Settings › Privacy & Security** and scroll to **Security**. Click **Open Anyway** next to the message about DriveApp. This button appears for about an hour after the blocked attempt.
-  3. Confirm with your password or Touch ID, then choose **Open**.
-- **macOS 14 and earlier:** right-click › **Open** › **Open** worked. DriveApp needs macOS 26, so this path doesn't apply.
-- **Terminal alternative** (a test machine you control only): `xattr -dr com.apple.quarantine /Applications/DriveApp.app`.
+1. Copy `DriveApp.app` from the DMG to `/Applications`, open it once, and dismiss the warning.
+2. Open **System Settings › Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to the DriveApp message. The button appears for about an hour after the blocked attempt.
+3. Confirm with your password or Touch ID, then choose **Open**.
 
-The app runs in the menu bar (no Dock icon). Look for the drive icon in the menu bar; the menu shows the version and build.
+On a test machine you control, the Terminal alternative is `xattr -dr com.apple.quarantine /Applications/DriveApp.app`.
 
-Unsigned builds are only for checking that the pipeline works. The FSKit module in an unsigned build claims its restricted entitlement without a profile, so macOS will not run it. FSKit extensions and App Group IPC need a proper Developer ID signature and profile, so B01/G0 testing needs a signed and notarised build (see `10-repo-ci-and-test-builds.md` §4). In an unsigned build, `DEVELOPMENT_TEAM` is empty, so the `DriveAppStorageMachService` Info.plist value starts with a dot (`.com.wakeupmonster.driveapp.dev.storage`).
+Limits of an unsigned Mac build:
+
+- There is no Team ID. The App Group (`$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID)`) becomes `.com.wakeupmonster.driveapp.dev`, which is not team-prefixed, so macOS may ask the user to allow DriveApp to access data from other apps.
+- Restricted entitlements such as keychain sharing are left out.
+- Use the unsigned build to check the pipeline, the menu-bar UI and the configuration. Test Finder integration (File Provider) and token sharing with a signed, notarised build.
+
+### Windows (unsigned installer or zip)
+
+Microsoft Defender SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**. Some notes:
+
+- If the file came from a browser, you may first have to choose **Keep** in the download list, or unblock it: right-click the file › **Properties** › **Unblock**.
+- With Smart App Control on (some Windows 11 installs), unsigned apps are **blocked outright** and there is no Run anyway. Test on a PC where Smart App Control is off, or use a signed build.
+- Signed builds with a new certificate can still show SmartScreen until the certificate earns reputation. Azure Artifact Signing builds reputation faster.
 
 ## 7. Troubleshooting
 
 | Symptom | Likely cause and fix |
 | --- | --- |
-| `VERSION '…' is not valid` / `BUILD_NUMBER '…' is not valid` | Use `1.2.3` (optionally `-beta.1`) and plain digits without leading zeros. |
-| `Release v… already exists` / `Tag v… already exists` | Use a new `build_number`, or delete the old draft release (and tag). |
-| `No /Applications/Xcode_26*.app found` | The runner image changed. Check the image README (link below), then pick another image or set `XCODE_APP` in the workflow `env:`. |
-| `brew install xcodegen` slow or failing | Homebrew outage. Re-run. XcodeGen isn't preinstalled on the image. |
-| `Could not import the .p12` | Wrong `MACOS_CERT_PASSWORD`, or the base64 got mangled. Re-encode with `base64 -i file.p12` and paste without extra spaces. |
-| `No valid 'Developer ID Application' identity` | The `.p12` has no private key, or holds an "Apple Development" certificate. Export the Developer ID Application certificate together with its key. |
-| `The archive is not an app archive` | A non-app target (FSKit extension, helper tool) lacks `SKIP_INSTALL: "YES"` in `project.yml`. |
-| `MACOS_CERT_P12_BASE64 is set but MACOS_PROFILE_FSEXT_BASE64 is not` | Add the FSKit module profile secret (§2), or remove the `.p12` secret for an unsigned build. |
-| `MACOS_PROFILE_…: profile team/App ID/…` | The profile does not match this build. The message names the field. Regenerate it for the right bundle ID, as a Developer ID profile, with the certificate in the `.p12`. |
-| `…requires a provisioning profile` from Xcode for `DriveApp` | Xcode wants an app profile after all. Add `MACOS_PROFILE_APP_BASE64` (§2). |
-| `…does not support provisioning profiles` for `DriveAppStorageService` | A profile reached the command-line tool. Only set profiles through `DRIVEAPP_FS_PROFILE` / `DRIVEAPP_APP_PROFILE`, never a global `PROVISIONING_PROFILE_SPECIFIER`. |
-| `Unknown nested code …` (unsigned build) | A new target is embedded in the app. Add it to `ADHOC_NESTED` in `scripts/build-dmg.sh` with its entitlements file. |
-| `Nested code problems: …` (signed build) | A nested binary lacks the Developer ID signature, hardened runtime, secure timestamp or (for the `.appex`) the embedded profile. Notarisation would reject it, so the run stops before submitting. |
-| `Notarisation failed` | The log prints `notarytool log` output. Common causes: missing hardened runtime on a nested binary, an unsigned nested binary, or a missing secure timestamp. |
-| `Notarisation skipped: …` | Expected when the build is unsigned or the ASC secrets are missing or incomplete. The message names what is missing. |
-| `hdiutil create failed` | Rare "Resource busy" on CI. The script already retries 3 times; re-run the workflow. |
-| Run cancelled while waiting | A newer run replaced it in the concurrency queue (see §3). |
+| `VERSION '…' is not valid` / `BUILD_NUMBER '…' is not valid` | Use `1.2.3` (optionally `-beta.1`) and plain digits without leading zeros. On Windows the build number is at most 65535. |
+| `Release …/Tag … already exists` | Use a new `build_number`, or delete the old draft release (and its tag). |
+| `GOOGLE_CLIENT_ID_… is empty` warning | Set the repository variable (§2.1). The build itself is fine. |
+| `GOOGLE_REVERSED_CLIENT_ID … does not match` | Fix or clear the variable; the script derives it from `GOOGLE_CLIENT_ID_MAC`. |
+| `Info.plist has no GoogleClientID key` warning / `Info.plist … is '…' but the build injected '…'` | `project.yml` does not map the build setting to the Info.plist key of the app. |
+| `No /Applications/Xcode_26*.app found` | The runner image changed. Check the image README (§8) or set `XCODE_APP` in the workflow `env:`. |
+| `project.yml must define targets DriveApp and DriveAppFileProvider` / `bundle ID is '…', expected …` / `is not an app extension` / `must set SKIP_INSTALL: YES` | `project.yml` does not match the contract: target names, `$(APP_BUNDLE_ID).fileprovider`, type `app-extension`, `SKIP_INSTALL: YES` on the extension. |
+| `… claims restricted entitlements (…), so a Developer ID build needs MACOS_PROFILE_…` | Add the profile named in the message (§2.3), or remove `MACOS_CERT_P12_BASE64` for an unsigned build. |
+| `MACOS_PROFILE_…: profile team/App ID/… ` / `does not authorise keychain-access-groups` | The profile does not fit. Regenerate it for that bundle ID as a Developer ID profile with the certificate from the `.p12`, and with the Keychain Sharing / App Groups capabilities enabled. |
+| `Could not import the .p12` / `No valid 'Developer ID Application' identity` | Wrong password, a mangled base64 value, or a certificate without its key or of the wrong type. |
+| `Expected DriveAppFileProvider.appex in Contents/PlugIns` | The app target does not embed the extension (`embed: true`). |
+| `Unknown nested code …` (unsigned) | A new bundle type is embedded in the app. Teach `adhoc_sign_app` in `build-dmg.sh` about it. |
+| `Nested code problems: …` (signed) | Nested code lacks the Developer ID signature, hardened runtime, timestamp or (if a profile was given) its embedded profile. Notarisation would reject it. |
+| `Notarisation failed` | The log includes `notarytool log`. |
+| `appsettings.json is missing from the publish output` | `DriveSync.App.csproj` must copy `appsettings.json` with `CopyToPublishDirectory`. |
+| `dotnet publish did not produce DriveSync.App.exe` | The app's `AssemblyName` changed, or the project is not an executable. The script reads `AssemblyName` from the `.csproj`. |
+| `signtool.exe not found` | The image changed. Check the Windows SDK in the image README. |
+| `Could not open the .pfx` / `no private key` / `not valid for code signing` / `expired` | Re-export the certificate with its key, check the password, use a Code Signing certificate. |
+| `signtool sign failed 3 times` | Usually the timestamp server. Re-run. |
+| `Inno Setup failed` | The log shows the ISCC error with the line in `DriveApp.iss`. |
+| Uninstall leaves a `WakeupMonster` entry in Explorer | The app's `--unregister` switch is missing or failed. It must unregister the sync root even when called by the uninstaller. |
+| Core tests: `Expected exactly one solution in windows/` | Keep exactly one `.sln` in `windows/`. |
+| Run cancelled while waiting | A newer run replaced it in the concurrency queue (§3). |
 
-The full `xcodebuild` logs are in `build/logs/` on the runner. On failure the script prints the last 60 lines. Logs are not uploaded as artifacts, on purpose.
+Logs are not uploaded as artifacts, on purpose. Mac `xcodebuild` logs are in `build/logs/` on the runner, and the script prints the last 60 lines on failure.
 
 ## 8. Decisions and evidence
 
-### Runner image: `macos-26`
+### Runner images (checked 24 November 2026 in the [actions/runner-images README](https://github.com/actions/runner-images))
 
-Checked 16 November 2026 in the [actions/runner-images README](https://github.com/actions/runner-images):
-
-- *macOS 26 Arm64* has the labels `macos-latest`, `macos-26` and `macos-26-xlarge`. *macOS 15 Arm64* is `macos-15`, and macOS 14 images are deprecated.
-- [macos-26-arm64 image README](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md): image `20261102.0473.1`, macOS 26.7.2 (25G332). It ships Xcode 26.6 (default), 26.5, 26.4.1, 26.3, 26.2, 26.1.1 and 26.0.1 under `/Applications/Xcode_26.*.app`, plus Homebrew and GitHub CLI 2.103.3. XcodeGen is not listed, so the script installs it.
-
-The workflow pins `macos-26`, not `macos-latest`, so a future OS change is deliberate. The script picks the newest non-beta `Xcode_26*.app`, skipping symlinks such as `Xcode_26.4.app`. Today that is Xcode 26.6. To pin an exact Xcode, set `XCODE_APP: /Applications/Xcode_26.6.app` in the workflow `env:`.
-
-actionlint 1.7.7 predates the `macos-26` label, so `.github/actionlint.yaml` declares it.
-
-### Actions pinned to commit SHAs
-
-| Action | Pin | How checked |
+| Label | Image | Evidence |
 | --- | --- | --- |
-| `actions/checkout` | `fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09` (v5.1.0) | `git ls-remote https://github.com/actions/checkout`: `refs/tags/v5.1.0` and `refs/tags/v5` both point at this commit. |
+| `macos-26` | macOS 26 Arm64 (`macos-latest`, `macos-26`, `macos-26-xlarge`) | Xcode 26.x under `/Applications/Xcode_26.*.app`. The script picks the newest non-beta one. XcodeGen is not preinstalled, so it is installed with Homebrew. |
+| `windows-2025` | Windows Server 2025 (`windows-latest`, `windows-2025`, `windows-2025-vs2026`) | [Image README](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md), image `20261116.315.1`: .NET SDKs 8.0.134 to 8.0.428 (plus 9, 10 and 11), Windows SDK 10.0.26100.0 (signtool), **Inno Setup 6.7.1**, PowerShell 7.6.10, GitHub CLI 2.104.0, Chocolatey 2.7.5. |
+| `ubuntu-24.04` | Ubuntu 24.04 (`ubuntu-latest`, `ubuntu-24.04`) | Core tests. |
 
-No other actions are used. Checkout uses `persist-credentials: false`; `gh` authenticates with `GH_TOKEN` (the job's `github.token`, `contents: write` only).
+All three are pinned instead of using `*-latest`, so an OS change is a deliberate edit. The `windows-2025` label now points at the VS 2026 variant of the image. If Inno Setup ever disappears from it, the script installs the pinned Chocolatey package `innosetup 6.7.1` (the latest on community.chocolatey.org, 17 February 2026).
+
+actionlint 1.7.7 does not know `macos-26`, so `.github/actionlint.yaml` declares it.
+
+### Pinned actions and images
+
+| Item | Pin | How checked |
+| --- | --- | --- |
+| `actions/checkout` | `fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09` (v5.1.0) | `git ls-remote https://github.com/actions/checkout`: `refs/tags/v5.1.0` and `v5` point here. v5 runs on Node 24. v6.1.0 exists; v5 is kept because it is already in use. |
+| `actions/setup-dotnet` | `26b0ec14cb23fa6904739307f278c14f94c95bf1` (v5.4.0) | `git ls-remote https://github.com/actions/setup-dotnet`: `refs/tags/v5.4.0` and `v5` point here (lightweight tags). v5 is used rather than v4.3.1 (`67a3573c…`) because v4 runs on Node 20, which GitHub is retiring from its runners. v5 needs runner 2.327.1+, which hosted runners have. |
+| `swift` container | `swift:6.2.4-noble@sha256:576698469fd3cf95b2abdeb91a7571d3afcd91806c87283dd01d564803554c0f` | Docker Hub tags `6.2.4-noble` and `6.2-noble` both have this OCI index digest (registry `HEAD` on 24 November 2026). Local toolchain: Swift 6.2. |
 
 ### Other choices
 
-- **Archive, then export** (not `xcodebuild build`). For signed builds Xcode signs nested code inside-out (StorageService tool in `Contents/MacOS`, FSKit `.appex` in `Contents/Extensions`, then the app), and the export re-signs it for Developer ID. All non-app targets set `SKIP_INSTALL: YES`, so the archive stays an app archive.
-- **Unsigned builds don't let Xcode sign.** With `CODE_SIGN_IDENTITY=-` ("Sign to Run Locally"), Xcode still checks entitlements and reports "requires a provisioning profile" for restricted entitlements such as the FSKit one ([Apple Developer Forums 751658](https://developer.apple.com/forums/thread/751658)). So the archive uses `CODE_SIGNING_ALLOWED=NO`, and the script ad-hoc signs the copy inside-out with each target's entitlements file (`$(DEVELOPMENT_TEAM)` expanded to empty, as Xcode would) and `--options runtime`. The signed path is unchanged by this.
-- **Hardened runtime** is on in `project.yml`, and signed builds add `--timestamp --options=runtime`. A signed build fails if the app or any nested code lacks the Developer ID signature, the runtime flag or a secure timestamp, or if the `.appex` lacks its embedded profile. `codesign --verify --deep --strict` is used only to *verify*; Apple discourages `--deep` for signing, which the script never does.
-- **The DMG is notarised and stapled**, not the `.app` separately. Notarising the DMG covers the app inside it.
-- **No caching.** XcodeGen comes from a Homebrew bottle. DerivedData isn't cached.
+- **Mac: archive, then export.** The signed path lets Xcode sign inside-out and re-sign for Developer ID on export.
+- **Mac: unsigned builds don't let Xcode sign.** With `CODE_SIGN_IDENTITY=-`, Xcode still demands profiles for restricted entitlements ([Apple Developer Forums 751658](https://developer.apple.com/forums/thread/751658)). The script ad-hoc signs instead:
+  - It reads entitlements from the target's real `CODE_SIGN_ENTITLEMENTS`.
+  - It expands every `$(VAR)` / `${VAR}` from that target's build settings, with `DEVELOPMENT_TEAM` empty as Xcode would. Undefined settings become empty, with a warning.
+  - It leaves out restricted keys.
+- **Mac: the DMG is notarised and stapled**, not the app separately.
+- **Windows: self-contained, folder publish** (not single-file). There is no runtime to install, and the Cloud Files and WinRT interop DLLs stay as ordinary files.
+- **Windows: Inno Setup, per-user.** No admin prompt, and a sync client is per-user anyway. MSIX was not chosen: Cloud Files providers can be packaged, but an MSIX normally needs a trusted signature to install, which an unsigned test build cannot have.
+- **Windows: only our binaries are signed.** Microsoft and NuGet binaries keep their own signatures.
+- **No caching** in any workflow.
+- **`scripts/validate-env.sh` was removed.** It checked FSKit-era requirements: macOS 26, SIP, the FSKit SDK and a spike test machine. `scripts/build-dmg.sh preflight` plus `select_xcode` now cover the generic checks on a build machine (macOS, Xcode 26 and its SDK, XcodeGen, tools).
+- **Windows targets .NET 10 (LTS).** .NET 8 support ended on 10 November 2026, so `windows/` and both workflows use .NET 10 (`dotnet-version: 10.0.x`).
 
-## What is verified and what is not
+## 9. What is verified and what is not
 
-Verified on Linux (this session):
+Verified on Linux in this session (24 November 2026):
 
 | Check | Result |
 | --- | --- |
-| `actionlint .github/workflows/build-dmg.yml` (shellcheck integration on) | pass |
-| `shellcheck -x scripts/build-dmg.sh` | pass |
-| `yamllint -d relaxed project.yml .github/workflows/build-dmg.yml` | pass |
-| `ExportOptions.plist`, `App/Info.plist` and `App/DriveApp.entitlements` parse as XML plists (Python `plistlib`) | pass |
-| `scripts/build-dmg.sh --help`, input validation, non-macOS stop (exit 3), `cleanup` no-op | pass |
-| `xcodegen generate` (XcodeGen 2.44.1 built from source on Linux) into a scratch directory: "Embed ExtensionKit Extensions" (`$(EXTENSIONS_FOLDER_PATH)`, CodeSignOnCopy) for the `.appex`, Copy Files to Executables for the tool, per-target `PROVISIONING_PROFILE_SPECIFIER`, the LaunchAgent script phase inlined with its output path | pass (generated project not committed) |
+| `actionlint` (1.7.7, shellcheck integration) on all 3 workflows | pass |
+| `shellcheck -x scripts/*.sh` (0.11.0) | pass |
+| `yamllint -d relaxed .github/` | pass (line-length warnings only) |
+| `scripts/ExportOptions.plist` parses (Python `plistlib`) | pass |
+| `bash scripts/build-dmg.sh --help`; `build` on Linux stops with exit 3 after the input and config checks; invalid version exits 2; client ID / reversed ID mismatch stops; reversed ID derived; `cleanup` no-op | pass |
+| `build-dmg.sh` entitlement resolver (perl `$(VAR)` expansion, undefined → empty) and restricted-key filter, on a sample entitlements file | pass |
+| `build-windows.ps1`: PowerShell 7.4.6 parser (0 errors); PSScriptAnalyzer 1.23.0 (0 warnings or errors; only *Information* about positional arguments) | pass |
+| `build-windows.ps1` help, invalid inputs (exit 2), non-Windows stop (exit 3), `cleanup` | pass |
+| `build-windows.ps1 build -NoInstaller` on a scratch copy of the layout with stub projects: test run, self-contained `win-x64` and `win-arm64` publish, `FileVersion 0.1.0.7` / `ProductVersion 0.1.0-beta.1+build.7` in the binary, `appsettings.json` values injected, secret absent from the log, zips plus `.sha256` (`sha256sum -c` OK) | pass (not on the real `windows/` projects, which were being written at the same time) |
 
-**Not run** (needs a macOS runner or a Mac with Xcode 26):
+**Not run** (needs GitHub-hosted runners, a Mac with Xcode 26, or Windows):
 
-- Building the generated project with Xcode (the XcodeGen output itself was inspected on Linux).
-- The unsigned path: `CODE_SIGNING_ALLOWED=NO` archive, then ad-hoc signing inside-out and `codesign --verify --deep --strict`.
-- The signed path with the FSKit profile: profile checks, Xcode accepting `PROVISIONING_PROFILE_SPECIFIER=<UUID>` on the `.appex` and no profile on the app and tool, `-exportArchive` with `provisioningProfiles` (including how export treats the profile-less tool in `Contents/MacOS`).
-- Xcode selection on the real image, `xcodebuild archive` and `-exportArchive`, and compiling the Swift placeholder under Swift 6.
-- Keychain import, Developer ID signing, the hardened runtime and timestamp checks.
-- `hdiutil create`/`verify`, DMG signing, notarisation, stapling, `spctl`.
-- `gh release create` (draft pre-release) and the existing-release and tag checks.
-- The `if: always()` cleanup on a real runner. The concurrency and timeout behaviour.
-- Installing and launching the DMG on macOS 26 (Gatekeeper prompts, menu-bar item, version display).
+- Any workflow run, including concurrency, timeouts, the `if: always()` cleanup and `gh release create`.
+- Mac:
+  - XcodeGen and `xcodebuild` against the new `project.yml`;
+  - `-showBuildSettings` parsing on real output;
+  - the unsigned archive and inside-out ad-hoc signing of `PlugIns/DriveAppFileProvider.appex`;
+  - the signed path with and without profiles, export, notarisation;
+  - the Info.plist configuration check;
+  - installing and launching the app, and whether an ad-hoc-signed File Provider extension loads at all.
+- Windows:
+  - the real `DriveSync.App` publish;
+  - Inno Setup compiling `DriveApp.iss` (syntax not checked: no ISCC on Linux);
+  - Authenticode signing and verification;
+  - the certificate store import and cleanup;
+  - choco fallback;
+  - installing, upgrading and uninstalling, including `--unregister`;
+  - SmartScreen behaviour.
+- Core tests in GitHub Actions. The `swift` container job and the `dotnet` job on `ubuntu-24.04` were not run there, and the real `Packages/DriveCore` and `windows/` code was not built here by this pipeline work.

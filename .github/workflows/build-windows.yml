@@ -1,0 +1,83 @@
+# Build Windows: tests, publishes and packages the Windows app (win-x64 and
+# win-arm64, self-contained .NET 10) on a GitHub-hosted Windows runner and
+# attaches the installers and portable zips to a DRAFT PRE-RELEASE tagged
+# win-v<version>-b<build> (separate from the Mac tags v<version>-b<build>).
+#
+# Manual trigger only (Actions > Build Windows > Run workflow).
+#
+# All logic lives in scripts/build-windows.ps1; the steps below only call it.
+# How to add the secrets/variables and run it: docs/12-pipeline-usage.md.
+#
+# Installers are NEVER uploaded with actions/upload-artifact (that counts
+# toward the account's storage quota). They are GitHub Release assets instead.
+
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.0.1 (MAJOR.MINOR.PATCH[-pre])"
+        required: true
+        type: string
+      build_number:
+        description: "Build number, digits only, 0-65535, e.g. 1"
+        required: true
+        type: string
+
+# Least privilege: only what `gh release create` needs.
+permissions:
+  contents: write
+
+# One build at a time. A queued run waits for the running one to finish.
+concurrency:
+  group: build-windows-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Build Windows installers
+    # Pinned image (not windows-latest): Windows Server 2025 with Visual
+    # Studio 2026, Windows SDK 10.0.26100, .NET SDKs (10.0 installed by setup-dotnet) and Inno Setup 6.
+    # Evidence in docs/12-pipeline-usage.md.
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Inputs go through env, never interpolated into script code.
+      VERSION: ${{ inputs.version }}
+      BUILD_NUMBER: ${{ inputs.build_number }}
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test, publish, sign, package and publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Non-secret app configuration (repository VARIABLES). Empty = warning.
+          GOOGLE_CLIENT_ID_WINDOWS: ${{ vars.GOOGLE_CLIENT_ID_WINDOWS }}
+          DRIVE_ROOT_SHARED_DRIVE_NAME: ${{ vars.DRIVE_ROOT_SHARED_DRIVE_NAME || 'WakeupMonster' }}
+          DRIVE_ROOT_FOLDER_ID: ${{ vars.DRIVE_ROOT_FOLDER_ID }}
+          # Google "Desktop app" client secret (Google treats it as
+          # non-confidential; it ships inside appsettings.json). Kept as a
+          # secret so it is masked in logs.
+          GOOGLE_CLIENT_SECRET_WINDOWS: ${{ secrets.GOOGLE_CLIENT_SECRET_WINDOWS }}
+          # Optional Authenticode signing (empty = files named -unsigned).
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./scripts/build-windows.ps1 build
+
+      - name: Remove imported certificate and decoded files
+        if: always()
+        run: ./scripts/build-windows.ps1 cleanup

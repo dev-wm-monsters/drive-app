@@ -1,11 +1,12 @@
-# Build DMG: builds the macOS app on a GitHub-hosted macOS runner, packages it
-# as a DMG and attaches it to a DRAFT PRE-RELEASE.
+# Build DMG: builds the macOS app (DriveApp + File Provider extension) on a
+# GitHub-hosted macOS runner, packages it as a DMG and attaches it to a DRAFT
+# PRE-RELEASE tagged v<version>-b<build>.
 #
 # Manual trigger only (Actions > Build DMG > Run workflow). There are no push,
 # pull_request or schedule triggers, to save macOS minutes.
 #
 # All logic lives in scripts/build-dmg.sh; the steps below only call it.
-# How to add the secrets and run it: docs/12-pipeline-usage.md.
+# How to add the secrets/variables and run it: docs/12-pipeline-usage.md.
 #
 # The DMG is NEVER uploaded with actions/upload-artifact (that counts toward
 # the account's storage quota). It is a GitHub Release asset instead.
@@ -53,15 +54,22 @@ jobs:
       - name: Build, sign, package, notarise and publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          # Non-secret app configuration (repository VARIABLES). Empty = warning;
+          # the shared drive name falls back to WakeupMonster.
+          GOOGLE_CLIENT_ID_MAC: ${{ vars.GOOGLE_CLIENT_ID_MAC }}
+          GOOGLE_REVERSED_CLIENT_ID: ${{ vars.GOOGLE_REVERSED_CLIENT_ID }}
+          DRIVE_ROOT_SHARED_DRIVE_NAME: ${{ vars.DRIVE_ROOT_SHARED_DRIVE_NAME || 'WakeupMonster' }}
+          DRIVE_ROOT_FOLDER_ID: ${{ vars.DRIVE_ROOT_FOLDER_ID }}
           # Optional signing (all empty = unsigned, ad-hoc signed DMG).
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Developer ID provisioning profiles (base64 .provisionprofile).
-          # FSKit module: required when signing. App: optional.
-          MACOS_PROFILE_FSEXT_BASE64: ${{ secrets.MACOS_PROFILE_FSEXT_BASE64 }}
+          # Required only for a target whose entitlements are restricted
+          # (e.g. keychain-access-groups); the script says which.
           MACOS_PROFILE_APP_BASE64: ${{ secrets.MACOS_PROFILE_APP_BASE64 }}
+          MACOS_PROFILE_EXT_BASE64: ${{ secrets.MACOS_PROFILE_EXT_BASE64 }}
           # Optional notarisation (App Store Connect API key).
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}

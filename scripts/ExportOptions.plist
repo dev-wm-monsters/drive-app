@@ -5,8 +5,9 @@
   Used by scripts/build-dmg.sh for SIGNED builds only. The script copies this
   file to a temporary directory, sets teamID from the APPLE_TEAM_ID secret and
   adds a provisioningProfiles dictionary (bundle ID -> profile UUID) for the
-  FSKit module (MACOS_PROFILE_FSEXT_BASE64) and, if given, the app
-  (MACOS_PROFILE_APP_BASE64). Nothing team- or profile-specific is committed.
+  app (MACOS_PROFILE_APP_BASE64) and the File Provider extension
+  (MACOS_PROFILE_EXT_BASE64), each only if given. Nothing team- or
+  profile-specific is committed.
 -->
 <plist version="1.0">
 <dict>
