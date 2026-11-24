@@ -1,0 +1,85 @@
+{
+  "description": "Shared test vectors for display-name disambiguation. Swift (Packages/DriveCore) and C# (windows/) tests MUST both pass these. Algorithm: docs/14-shared-drive-sync.md.",
+  "sanitize": [
+    { "in": "clip.mp4", "out": "clip.mp4" },
+    { "in": "Q1: plan?.mov", "out": "Q1_ plan_.mov" },
+    { "in": "a/b\\c|d*e\"f<g>h", "out": "a_b_c_d_e_f_g_h" },
+    { "in": "trail. ", "out": "trail" },
+    { "in": "...", "out": "_" },
+    { "in": "", "out": "_" },
+    { "in": "CON.txt", "out": "CON_.txt" },
+    { "in": "lpt1", "out": "lpt1_" },
+    { "in": "console.txt", "out": "console.txt" },
+    { "in": ".hidden", "out": ".hidden" },
+    { "in": "tab\there", "out": "tab_here" },
+    { "in": "Café.mov", "out": "Café.mov" }
+  ],
+  "assign": [
+    {
+      "name": "no duplicates",
+      "children": [
+        { "id": "1", "name": "clip.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-01T00:00:00Z" }
+      ],
+      "expected": { "1": "clip.mp4" }
+    },
+    {
+      "name": "three duplicates, ordered by createdTime then id",
+      "children": [
+        { "id": "b", "name": "v.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "c", "name": "v.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "a", "name": "v.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-01T00:00:00Z" }
+      ],
+      "expected": { "a": "v.mp4", "b": "v (2).mp4", "c": "v (3).mp4" }
+    },
+    {
+      "name": "case-insensitive clash",
+      "children": [
+        { "id": "1", "name": "Video.MP4", "mimeType": "video/mp4", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "video.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-02T00:00:00Z" }
+      ],
+      "expected": { "1": "Video.MP4", "2": "video (2).mp4" }
+    },
+    {
+      "name": "generated name clashes with a later real name",
+      "children": [
+        { "id": "1", "name": "a.txt", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "a.txt", "mimeType": "text/plain", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "3", "name": "a (2).txt", "mimeType": "text/plain", "createdTime": "2026-01-03T00:00:00Z" }
+      ],
+      "expected": { "1": "a.txt", "2": "a (2).txt", "3": "a (2) (2).txt" }
+    },
+    {
+      "name": "no extension, multi-dot extension, folder vs file",
+      "children": [
+        { "id": "1", "name": "notes", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "notes", "mimeType": "application/vnd.google-apps.folder", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "3", "name": "archive.tar.gz", "mimeType": "application/gzip", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "4", "name": "archive.tar.gz", "mimeType": "application/gzip", "createdTime": "2026-01-05T00:00:00Z" }
+      ],
+      "expected": { "1": "notes", "2": "notes (2)", "3": "archive.tar.gz", "4": "archive.tar (2).gz" }
+    },
+    {
+      "name": "hidden items are dropped and do not reserve names",
+      "children": [
+        { "id": "1", "name": "plan", "mimeType": "application/vnd.google-apps.document", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "link", "mimeType": "application/vnd.google-apps.shortcut", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "3", "name": "plan", "mimeType": "text/plain", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "4", "name": "gone.mp4", "mimeType": "video/mp4", "createdTime": "2026-01-02T00:00:00Z", "trashed": true }
+      ],
+      "expected": { "3": "plan" }
+    },
+    {
+      "name": "sanitized names collide",
+      "children": [
+        { "id": "1", "name": "a:b.txt", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "a_b.txt", "mimeType": "text/plain", "createdTime": "2026-01-02T00:00:00Z" }
+      ],
+      "expected": { "1": "a_b.txt", "2": "a_b (2).txt" }
+    }
+  ],
+  "uniqueUploadName": [
+    { "desired": "v.mp4", "existing": [], "out": "v.mp4" },
+    { "desired": "v.mp4", "existing": ["v.mp4", "V (2).mp4"], "out": "v (3).mp4" },
+    { "desired": "x?.mov", "existing": ["x_.mov"], "out": "x_ (2).mov" }
+  ]
+}
