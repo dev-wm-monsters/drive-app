@@ -3,6 +3,7 @@
 // Provider extension (FileProviderExtension/).
 
 import AppKit
+import Foundation
 import SwiftUI
 
 @main

@@ -15,6 +15,8 @@ import Observation
 final class AppModel {
     enum Phase: Equatable {
         case notConfigured(String)
+        /// Unsigned / ad-hoc build: tokens cannot be shared with the extension.
+        case unsupportedBuild
         case starting
         case signedOut
         case signingIn
@@ -63,13 +65,24 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
-        guard let services else { return }
+        guard let config, let services else { return }
+        guard config.hasTeamPrefixedAppGroup else {
+            Log.app.error("No team-prefixed App Group; sign-in cannot be shared with the extension")
+            phase = .unsupportedBuild
+            return
+        }
         Task {
             let tokens: OAuthTokens?
             do {
                 tokens = try services.store.load()
+            } catch KeychainError.missingEntitlement {
+                phase = .unsupportedBuild
+                return
+            } catch KeychainError.corruptItem {
+                phase = .signedOut
+                return
             } catch {
-                phase = .failed(DriveError.from(error).userMessage)
+                phase = .failed(Self.message(for: error))
                 return
             }
             guard let tokens else {
@@ -84,6 +97,7 @@ final class AppModel {
     var statusLine: String {
         switch phase {
         case .notConfigured(let message): return message
+        case .unsupportedBuild: return KeychainError.unsharedBuildMessage
         case .starting: return "Starting\u{2026}"
         case .signedOut: return "Not signed in"
         case .signingIn: return "Signing in\u{2026}"
@@ -122,6 +136,8 @@ final class AppModel {
         } catch let error as SignInError {
             phase = .signedOut
             notice = error.message
+        } catch KeychainError.missingEntitlement {
+            phase = .unsupportedBuild
         } catch {
             let drive = DriveError.from(error)
             Log.auth.error("Sign-in failed: \(String(describing: drive), privacy: .public)")
@@ -176,13 +192,19 @@ final class AppModel {
                 scheduleReconnect()
             default:
                 if error is DriveError || error is KeychainError {
-                    phase = .failed(drive.userMessage)
+                    phase = .failed(Self.message(for: error))
                 } else {
                     // FileProvider refused the domain (e.g. extension not found/signed).
                     phase = .failed("Could not add the Finder location: \((error as NSError).localizedDescription)")
                 }
             }
         }
+    }
+
+    /// User-facing text for any error from the sign-in / connect paths.
+    static func message(for error: any Error) -> String {
+        if let keychain = error as? KeychainError { return keychain.description }
+        return DriveError.from(error).userMessage
     }
 
     private func scheduleReconnect() {
