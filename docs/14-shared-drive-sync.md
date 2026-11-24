@@ -61,7 +61,7 @@ Drive allows several files with the same name in one folder. Finder and Explorer
 
 1. **sanitize(name):** NFC-normalize. Replace each of `/ \ : * ? " < > |`, U+0000–U+001F and U+007F with `_`. Trim trailing spaces and dots. Empty → `_`. If the part before the first `.`, uppercased, is one of `CON PRN AUX NUL COM1…COM9 LPT1…LPT9`, append `_` to that part (`CON.txt` → `CON_.txt`).
 2. **split(name):** the extension starts at the **last** `.`, unless that `.` is at index 0. `.bashrc` → stem `.bashrc`, ext `""`. `a.tar.gz` → `a.tar` + `.gz`.
-3. **key(name)** = sanitize(name), lowercased (Swift `lowercased()`, C# `ToLowerInvariant()`).
+3. **key(name)** = sanitize(name), lowercased per character (Swift `lowercased()`, C# `ToLowerInvariant()`), except U+0130 `İ`, which stays unchanged so both platforms agree (Swift would expand it to `i` + U+0307).
 4. **assign(children of one folder):** drop hidden items (Workspace docs, shortcuts, trashed). Sort by `createdTime` ascending, then `id` ordinal ascending. `taken = {}`. For each item: `candidate = sanitize(name)`, `n = 2`; while `key(candidate)` is in `taken`: `candidate = stem + " (" + n + ")" + ext`, `n += 1`. Add `key(candidate)` to `taken`; `display[id] = candidate`.
 5. **uniqueUploadName(desired, existing):** the same loop with `taken = {key(x) for x in existing}`, starting from `sanitize(desired)`. Our uploads pick a free name up front, so we never create a new duplicate.
 
