@@ -121,7 +121,13 @@ final class ProviderCore: Sendable {
         let folderID = Self.driveID(for: identifier, root: root)
         let result = try await listFolder(driveID: folderID, root: root, markEnumerated: true)
         await saveIndex(root: root)
-        return ChangeSet(updated: result.items, deleted: result.update.departed.sorted(), nextAnchor: anchor, moreComing: false)
+        // Deletions are global: only report items that left the tree, not
+        // items re-parented into another listed folder.
+        var deleted: [String] = []
+        for id in result.update.departed.sorted() where await index.entry(id) == nil {
+            deleted.append(id)
+        }
+        return ChangeSet(updated: result.items, deleted: deleted, nextAnchor: anchor, moreComing: false)
     }
 
     // MARK: Single items

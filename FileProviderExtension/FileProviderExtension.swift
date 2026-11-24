@@ -145,6 +145,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // disk) and symlinks stay on disk but are excluded from sync; the
         // system then shows them as "not synced" and calls deleteItem for the
         // template identifier, which we accept (unknown item).
+        // VERIFY-ON-MAC: Finder "New Folder" in the domain leaves a local,
+        // "not synced" folder (rather than an error dialog or a deletion).
         if type.conforms(to: .directory) || type.conforms(to: .symbolicLink) || parentIdentifier == NSFileProviderItemIdentifier.trashContainer.rawValue {
             Log.provider.info("Excluding a new non-file item from sync")
             done((nil, [], false, NSFileProviderError(.excludedFromSync)))
@@ -213,6 +215,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // restores the server's content. (Header: "If a field in the returned
         // item does not match ... the value from the item will be propagated
         // to the disk.")
+        // VERIFY-ON-MAC: a rename/move/edit from Terminal is reverted on disk
+        // (and the edited content re-downloaded) without a conflict copy.
         let refetch = changedFields.contains(.contents)
         if changedFields.contains(.contents) || changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
             Log.provider.info("Rolling back a local change to a read-only item")
@@ -264,6 +268,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     }
 
     // MARK: Thumbnails
+    // VERIFY-ON-MAC: Finder asks the extension for thumbnails through
+    // NSFileProviderThumbnailing conformance alone (no extra Info.plist key).
 
     func fetchThumbnails(for itemIdentifiers: [NSFileProviderItemIdentifier], requestedSize size: CGSize, perThumbnailCompletionHandler: @escaping (NSFileProviderItemIdentifier, Data?, (any Error)?) -> Void, completionHandler: @escaping ((any Error)?) -> Void) -> Progress {
         let progress = Progress(totalUnitCount: Int64(itemIdentifiers.count))
