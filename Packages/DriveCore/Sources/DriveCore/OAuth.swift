@@ -120,12 +120,11 @@ public struct OAuthClient: Sendable {
         ]
         if let secret = config.clientSecret { params.append(("client_secret", secret)) }
         let r = try await tokenRequest(params)
-        guard let refresh = r.refresh_token else {
-            throw .invalidResponse("token response without refresh_token")
-        }
+        // With access_type=offline + prompt=consent Google always returns a refresh token; if it ever does not,
+        // the session works until expiry and then reports .needsLogin.
         return OAuthTokens(
             accessToken: r.access_token,
-            refreshToken: refresh,
+            refreshToken: r.refresh_token,
             expiresAt: now().addingTimeInterval(TimeInterval(r.expires_in ?? 3600)),
             email: r.id_token.flatMap(Self.email(fromIDToken:))
         )
