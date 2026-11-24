@@ -59,7 +59,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
             {
                 File.AppendAllText(path, LogRedactor.Redact(line.ToString()) + Environment.NewLine);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // logging must never take the app down
             }

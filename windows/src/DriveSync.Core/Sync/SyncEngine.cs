@@ -210,23 +210,27 @@ public sealed class SyncEngine : IDisposable
             ct.ThrowIfCancellationRequested();
             try
             {
-                Execute(action);
+                Execute(action, local);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
             {
                 // Typical: file in use. The next pass retries; never abort the whole plan for one item.
-                _logger.LogWarning("Action {Action} failed: {Error}", action.GetType().Name, ex.Message);
+                // IO messages carry file paths: names only at debug level (contract).
+                _logger.LogWarning("Action {Action} failed: {Error} (0x{HResult:X8})", action.GetType().Name, ex.GetType().Name, ex.HResult);
+                _logger.LogDebug("Action {Action} failed: {Message}", action.GetType().Name, ex.Message);
             }
         }
 
         return Task.CompletedTask;
     }
 
-    private void Execute(SyncAction action)
+    private void Execute(SyncAction action, IReadOnlyList<LocalEntry> local)
     {
         switch (action)
         {
             case SyncAction.DeletePlaceholder a:
+                // A placeholder the user edited in place (not in sync) keeps its bytes somewhere before it goes.
+                PreserveModified(local.Where(e => SyncPath.SameIgnoringCase(e.Path, a.Path) || SyncPath.IsUnder(e.Path, a.Path)));
                 _local.DeletePlaceholder(a.Path);
                 break;
             case SyncAction.MovePlaceholder a:
@@ -236,12 +240,13 @@ public sealed class SyncEngine : IDisposable
                 _local.CreatePlaceholder(a.ParentPath, a.Name, a.Item);
                 break;
             case SyncAction.UpdatePlaceholder a:
-                _local.UpdatePlaceholder(a.Path, a.Item, a.ContentChanged, a.DiscardLocalChanges);
                 if (a.DiscardLocalChanges)
                 {
-                    Notice?.Invoke(this, $"'{SyncPath.Name(a.Path)}' is read-only; local changes were discarded and the Drive version restored.");
+                    // Throws (and skips the update) when the edited bytes cannot be saved: never discard them silently.
+                    PreserveModified(local.Where(e => SyncPath.SameIgnoringCase(e.Path, a.Path)));
                 }
 
+                _local.UpdatePlaceholder(a.Path, a.Item, a.ContentChanged, a.DiscardLocalChanges);
                 break;
             case SyncAction.Hydrate a:
                 _local.Hydrate(a.Path);
@@ -252,6 +257,17 @@ public sealed class SyncEngine : IDisposable
             case SyncAction.Upload a:
                 QueueUpload(a);
                 break;
+        }
+    }
+
+    private void PreserveModified(IEnumerable<LocalEntry> entries)
+    {
+        foreach (var entry in entries.Where(e => e.IsPlaceholder && !e.IsDirectory && !e.InSync).ToList())
+        {
+            if (_local.PreserveLocalChanges(entry) is { } savedTo)
+            {
+                Notice?.Invoke(this, $"'{SyncPath.Name(entry.Path)}' is read-only in Drive, so the Drive version was restored. Your edited copy was saved to {savedTo}.");
+            }
         }
     }
 
@@ -273,7 +289,8 @@ public sealed class SyncEngine : IDisposable
             }
             catch (Exception ex) when (ex is DriveException or IOException or UnauthorizedAccessException or InvalidOperationException)
             {
-                _logger.LogWarning("Upload failed: {Error}", ex.Message);
+                _logger.LogWarning("Upload failed: {Error} (0x{HResult:X8})", ex is DriveException d ? d.Kind.ToString() : ex.GetType().Name, ex.HResult);
+                _logger.LogDebug("Upload failed: {Message}", ex.Message);
                 if (ex is DriveException { Kind: DriveErrorKind.QuotaExceeded or DriveErrorKind.Forbidden })
                 {
                     Notice?.Invoke(this, $"Could not upload '{SyncPath.Name(action.LocalPath)}': {ex.Message}");
@@ -305,7 +322,10 @@ public sealed class SyncEngine : IDisposable
             var siblings = await _drive.ListChildrenAsync(action.ParentId, root, ct).ConfigureAwait(false);
 
             DriveItem uploaded;
-            await using (var stream = _local.OpenForUpload(action.LocalPath))
+            // The stream (FileShare.Read) stays open until the file is converted, so nobody can change the bytes
+            // between the upload and the conversion that marks them as the in-sync Drive version.
+            var stream = _local.OpenForUpload(action.LocalPath);
+            await using (stream.ConfigureAwait(false))
             {
                 var length = stream.CanSeek ? stream.Length : -1;
                 var md5 = await Hashing.Md5HexAsync(stream, ct).ConfigureAwait(false);
@@ -336,32 +356,34 @@ public sealed class SyncEngine : IDisposable
                     uploaded = await _drive.UploadAsync(stream, name, action.ParentId, null, ct).ConfigureAwait(false);
                     _logger.LogInformation("Uploaded a new file ({Bytes} bytes)", length);
                 }
-            }
 
-            lock (_uploadedNotConverted)
-            {
-                _uploadedNotConverted[action.LocalPath] = uploaded;
-            }
-
-            await _lock.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                Tree!.AddListing(action.ParentId, siblings.Where(s => s.Id != uploaded.Id).Append(uploaded));
-                // Convert in place (keeps the bytes local, no re-download); the next plan renames it if its display
-                // name differs from the local name.
-                _local.ConvertToPlaceholder(action.LocalPath, uploaded);
                 lock (_uploadedNotConverted)
                 {
-                    _uploadedNotConverted.Remove(action.LocalPath);
+                    _uploadedNotConverted[action.LocalPath] = uploaded;
                 }
 
-                _stability.Forget(action.LocalPath);
-                await ReconcileCoreAsync(ct).ConfigureAwait(false);
+                await _lock.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    Tree!.AddListing(action.ParentId, siblings.Where(s => s.Id != uploaded.Id).Append(uploaded));
+                    // Convert in place (keeps the bytes local, no re-download); the next plan renames it if its
+                    // display name differs from the local name.
+                    _local.ConvertToPlaceholder(action.LocalPath, uploaded);
+                    lock (_uploadedNotConverted)
+                    {
+                        _uploadedNotConverted.Remove(action.LocalPath);
+                    }
+
+                    _stability.Forget(action.LocalPath);
+                }
+                finally
+                {
+                    _lock.Release();
+                }
             }
-            finally
-            {
-                _lock.Release();
-            }
+
+            // Reconcile after the stream is closed: the follow-up rename of the converted file needs DELETE access.
+            await RunExclusiveAsync(ReconcileCoreAsync, ct).ConfigureAwait(false);
 
             Uploaded?.Invoke(this, action.LocalPath);
         }

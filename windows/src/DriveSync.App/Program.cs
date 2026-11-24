@@ -23,8 +23,18 @@ internal static class Program
             return RunUnregister();
         }
 
-        var configuration = LoadConfiguration();
-        var config = DriveAppConfig.FromConfiguration(configuration);
+        DriveAppConfig config;
+        try
+        {
+            config = DriveAppConfig.FromConfiguration(LoadConfiguration());
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException or UnauthorizedAccessException)
+        {
+            // A hand-edited appsettings.json with a JSON error: say so instead of crashing silently.
+            MessageBox.Show("appsettings.json next to DriveSync.App.exe could not be read:\n\n" + ex.Message, "DriveApp", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+
         using var loggers = CreateLoggers();
         var logger = loggers.CreateLogger("App");
 

@@ -168,7 +168,7 @@ public static class SyncPlanner
                 continue;
             }
 
-            if (LocalFileFilter.IsIgnored(SyncPath.Name(entry.Path)) || !isReadyForUpload(entry))
+            if (entry.IsHiddenOrSystem || LocalFileFilter.IsIgnored(SyncPath.Name(entry.Path)) || !isReadyForUpload(entry))
             {
                 continue;
             }

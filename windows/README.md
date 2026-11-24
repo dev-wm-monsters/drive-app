@@ -81,9 +81,12 @@ Command-line switches:
 
 Sign out (after a confirmation) does these steps in order:
 1. Disconnects.
-2. Moves files that were never uploaded to `Documents\WakeupMonster - not uploaded <timestamp>`.
+2. Moves files that were never uploaded to `Documents\WakeupMonster - not uploaded <timestamp>`, and saves
+   placeholders that were edited in place to `Documents\WakeupMonster - edited copies`. Any failure here aborts
+   the sign-out before anything is deleted.
 3. Unregisters the sync root and the nav-pane entry.
-4. Deletes `%USERPROFILE%\WakeupMonster`. Everything is still in Drive, and hydrated copies are discarded too.
+4. Deletes the placeholder files under `%USERPROFILE%\WakeupMonster` (as identified before step 3) and the folders
+   left empty. Everything is still in Drive, and hydrated copies are discarded too. Any other file is left in place.
 5. Revokes the refresh token and deletes `token.bin`.
 
 Quit only disconnects. The folder stays registered, and opening a dehydrated file while the app is not running
@@ -144,11 +147,20 @@ Evidence and reasoning:
     `STATUS_CLOUD_FILE_ACCESS_DENIED`, so Explorer refuses them. A balloon explains why, at most once every 10 s.
   - Files carry `FILE_ATTRIBUTE_READONLY`.
   - If something edits a file in place anyway (after clearing read-only), the placeholder drops out of in-sync.
-    The planner emits `UpdatePlaceholder(DiscardLocalChanges)`, which restores the Drive version: it sets the file
-    in-sync, then dehydrates it. If the file is pinned, it is deleted and re-created instead.
+    Before anything is discarded, the engine calls `PreserveLocalChanges`: if the file is fully local and its MD5
+    differs from Drive's, the bytes are copied to `Documents\WakeupMonster - edited copies\<folder>\<name> (edited
+    <md5 prefix>).<ext>` (outside the sync root, so never uploaded) and a balloon names the copy. If the copy fails
+    (for example the editor still has the file open), nothing is discarded and the next pass retries. Then the
+    planner's `UpdatePlaceholder(DiscardLocalChanges)` restores the Drive version: it sets the file in-sync, then
+    dehydrates it. If the file is pinned, it is deleted and re-created instead. The same preservation runs before a
+    locally edited placeholder is deleted because its Drive item was removed.
+  - A full-file download that fails the `md5Checksum` check fails the last chunk (the file never becomes complete)
+    and clears the placeholder's in-sync state, so the next pass dehydrates the cached ranges.
 - **Uploads:**
   - A new non-placeholder file in the root or in a synced folder is uploaded once its size and mtime have been
-    stable for 3 s and no other process has it open for writing. Lock and temp names (`~$*`, `*.tmp`, `*.crdownload`, …) are ignored.
+    stable for 3 s and no other process has it open for writing. Lock and temp names (`~$*`, `*.tmp`, `*.crdownload`, …)
+    and files with the hidden or system attribute are ignored. The upload stream (`FileShare.Read`) stays open until
+    the file has been converted, so the converted bytes are exactly the uploaded ones.
   - Right before uploading, the app lists the folder again and picks a free name with `UniqueUploadName`, then does
     a resumable upload.
   - **The local file is then converted in place** with `CfConvertToPlaceholder(identity = Drive ID, MARK_IN_SYNC)`,
@@ -254,7 +266,7 @@ Prerequisites:
    - Renaming is refused, and moving out of the folder (drag to the desktop with Shift) is refused.
    - Notepad *Save* on a hydrated `.txt` fails because the file is read-only.
    - Clear the read-only attribute in Properties, then edit and save: within about 30 s the file is restored to
-     the Drive version and the balloon says local changes were discarded.
+     the Drive version and the balloon names the edited copy saved under `Documents\WakeupMonster - edited copies`.
 6. **Remote changes**, made from the phone or drive.google.com, each checked within about 30 s:
    - Upload a file: it appears.
    - Rename it: the name changes locally.

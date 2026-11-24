@@ -15,6 +15,7 @@ internal sealed record FetchRequest(
     long TransferKey,
     long RequestKey,
     string NormalizedPath,
+    string FullPath,
     long FileSize,
     PlaceholderIdentity? Identity,
     long RequiredOffset,
@@ -34,7 +35,10 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
 
     private readonly ILogger _logger;
     private readonly HydrationService _hydration;
-    private readonly ConcurrentDictionary<long, CancellationTokenSource> _transfers = new();
+    // Several FETCH_DATA requests can be outstanding for one TransferKey (one per open handle) at the same time, so
+    // in-flight work is tracked per request and CANCEL_FETCH_DATA cancels the ones whose range overlaps.
+    private readonly ConcurrentDictionary<long, InFlightFetch> _transfers = new();
+    private long _nextFetchId;
     private CallbackRegistration* _table;
     private GCHandle _self;
     private CF_CONNECTION_KEY _connectionKey;
@@ -108,9 +112,9 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
             return;
         }
 
-        foreach (var cts in _transfers.Values)
+        foreach (var fetch in _transfers.Values)
         {
-            cts.Cancel();
+            fetch.TryCancel();
         }
 
         var hr = PInvoke.CfDisconnectSyncRoot(_connectionKey);
@@ -138,11 +142,29 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
         public delegate* unmanaged[Stdcall]<CF_CALLBACK_INFO*, CF_CALLBACK_PARAMETERS*, void> Callback;
     }
 
-    internal void Completed(long transferKey)
+    private void Completed(long fetchId)
     {
-        if (_transfers.TryRemove(transferKey, out var cts))
+        if (_transfers.TryRemove(fetchId, out var fetch))
         {
-            cts.Dispose();
+            fetch.Cancellation.Dispose();
+        }
+    }
+
+    private sealed record InFlightFetch(long TransferKey, long Start, long End, CancellationTokenSource Cancellation)
+    {
+        public bool Overlaps(long transferKey, long offset, long length) =>
+            TransferKey == transferKey && offset < End && (length <= 0 || offset + length > Start);
+
+        public void TryCancel()
+        {
+            try
+            {
+                Cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // completed meanwhile
+            }
         }
     }
 
@@ -167,19 +189,31 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
 
     private static string PathOf(CF_CALLBACK_INFO* info) => info->NormalizedPath.Value is null ? string.Empty : new string(info->NormalizedPath.Value);
 
+    /// <summary>NormalizedPath is relative to the volume root ("\Users\me\..."); prefix the volume ("C:").</summary>
+    private static string FullPathOf(CF_CALLBACK_INFO* info)
+    {
+        var volume = info->VolumeDosName.Value is not null ? new string(info->VolumeDosName.Value)
+            : info->VolumeGuidName.Value is not null ? new string(info->VolumeGuidName.Value).TrimEnd('\\')
+            : null;
+        var path = PathOf(info);
+        return volume is null || path.Length == 0 ? string.Empty : volume + path;
+    }
+
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static void OnFetchData(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
     {
-        var provider = From(info);
+        CloudFilesProvider? provider = null;
         var fetch = parameters->FetchData;
         try
         {
+            provider = From(info);
             var identity = PlaceholderIdentity.TryDecode(new ReadOnlySpan<byte>(info->FileIdentity, (int)info->FileIdentityLength));
             var request = new FetchRequest(
                 info->ConnectionKey,
                 info->TransferKey,
                 info->RequestKey,
                 PathOf(info),
+                FullPathOf(info),
                 info->FileSize,
                 identity,
                 fetch.RequiredFileOffset,
@@ -192,17 +226,39 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
                 return;
             }
 
+            var id = Interlocked.Increment(ref provider._nextFetchId);
             var cts = new CancellationTokenSource();
-            provider._transfers[request.TransferKey] = cts;
-            // Never block the cfapi thread: download + TRANSFER_DATA happen on the thread pool.
-            _ = Task.Run(() => provider._hydration.ServeAsync(request, cts.Token).ContinueWith(_ => provider.Completed(request.TransferKey), TaskScheduler.Default));
+            provider._transfers[id] = new InFlightFetch(request.TransferKey, request.RequiredOffset, request.RequiredOffset + request.RequiredLength, cts);
+            // Never block the cfapi thread: download + TRANSFER_DATA happen on the thread pool. ServeAsync completes
+            // the request itself (success or STATUS_CLOUD_FILE_*), so nothing here may complete it a second time.
+            // (No await here: the class is an unsafe context.)
+            _ = Task.Run(() => provider._hydration.ServeAsync(request, cts.Token)).ContinueWith(
+                t =>
+                {
+                    _ = t.Exception; // observed; ServeAsync already answered the request
+                    provider.Completed(id);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
+#pragma warning disable CA1031 // must not throw across the native boundary; the request still gets an answer
         catch (Exception ex)
+#pragma warning restore CA1031
         {
-            provider?._logger.LogError("FETCH_DATA dispatch failed: {Error}", ex.GetType().Name);
-            HydrationService.Fail(
-                new FetchRequest(info->ConnectionKey, info->TransferKey, info->RequestKey, string.Empty, info->FileSize, null, fetch.RequiredFileOffset, fetch.RequiredLength, 0, 0),
-                NTSTATUS.STATUS_CLOUD_FILE_UNSUCCESSFUL);
+            try
+            {
+                provider?._logger.LogError("FETCH_DATA dispatch failed: {Error}", ex.GetType().Name);
+                HydrationService.Fail(
+                    new FetchRequest(info->ConnectionKey, info->TransferKey, info->RequestKey, string.Empty, string.Empty, info->FileSize, null, fetch.RequiredFileOffset, fetch.RequiredLength, 0, 0),
+                    NTSTATUS.STATUS_CLOUD_FILE_UNSUCCESSFUL);
+            }
+#pragma warning disable CA1031
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                // nothing else can be done; the platform times the request out after 60 s
+            }
         }
     }
 
@@ -212,9 +268,18 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
         try
         {
             var provider = From(info);
-            if (provider is not null && provider._transfers.TryGetValue(info->TransferKey, out var cts))
+            if (provider is null)
             {
-                cts.Cancel();
+                return;
+            }
+
+            var cancel = parameters->Cancel.FetchData;
+            foreach (var fetch in provider._transfers.Values)
+            {
+                if (fetch.Overlaps(info->TransferKey, cancel.FileOffset, cancel.Length))
+                {
+                    fetch.TryCancel();
+                }
             }
         }
         catch (Exception)
@@ -224,28 +289,12 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
-    private static void OnNotifyDelete(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
-    {
-        var allow = CallerPid(info) == OwnProcessId;
-        var provider = From(info);
-        Acknowledge(info, CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DELETE, allow, provider);
-        if (!allow)
-        {
-            provider?.RaiseRejected(PathOf(info));
-        }
-    }
+    private static void OnNotifyDelete(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters) =>
+        AcknowledgeChange(info, CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_DELETE);
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
-    private static void OnNotifyRename(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
-    {
-        var allow = CallerPid(info) == OwnProcessId;
-        var provider = From(info);
-        Acknowledge(info, CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_RENAME, allow, provider);
-        if (!allow)
-        {
-            provider?.RaiseRejected(PathOf(info));
-        }
-    }
+    private static void OnNotifyRename(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters) =>
+        AcknowledgeChange(info, CF_OPERATION_TYPE.CF_OPERATION_TYPE_ACK_RENAME);
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static void OnFileCloseCompletion(CF_CALLBACK_INFO* info, CF_CALLBACK_PARAMETERS* parameters)
@@ -261,6 +310,39 @@ public sealed unsafe partial class CloudFilesProvider : IDisposable
         catch (Exception)
         {
             // Must not throw across the native boundary.
+        }
+    }
+
+    /// <summary>Only this process (the sync engine applying Drive changes) may delete/rename/move placeholders.</summary>
+    private static void AcknowledgeChange(CF_CALLBACK_INFO* info, CF_OPERATION_TYPE type)
+    {
+        var allow = false;
+        CloudFilesProvider? provider = null;
+        try
+        {
+            allow = CallerPid(info) == OwnProcessId;
+            provider = From(info);
+        }
+#pragma warning disable CA1031 // must not throw across the native boundary; reject instead
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            allow = false;
+        }
+
+        Acknowledge(info, type, allow, provider);
+        if (!allow)
+        {
+            try
+            {
+                provider?.RaiseRejected(PathOf(info));
+            }
+#pragma warning disable CA1031
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                // ignore
+            }
         }
     }
 

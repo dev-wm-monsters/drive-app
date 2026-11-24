@@ -67,6 +67,8 @@ public class SyncEngineTests
         Assert.True(_fs.Entries["holiday.mov"].IsPlaceholder);
         Assert.StartsWith("up", _fs.Entries["holiday.mov"].FileId, StringComparison.Ordinal);
         Assert.Contains("convert holiday.mov", _fs.Log);
+        Assert.Equal(new[] { true }, _fs.ConvertedWhileLocked); // no write window between upload and conversion
+        Assert.Equal(0, _fs.OpenUploadStreams);
     }
 
     [Fact]
@@ -117,5 +119,75 @@ public class SyncEngineTests
         _drive.PendingChanges.Enqueue(new ChangeBatch(new DriveChange[] { new DriveChange.Upsert(File("b", "b.mp4")) }, null, "t2"));
         await engine.PollAsync(CancellationToken.None);
         Assert.Equal(2, _fs.Entries.Count);
+    }
+
+    [Fact]
+    public async Task Edited_placeholder_is_preserved_before_the_drive_version_is_restored()
+    {
+        _drive.Add(File("a", "v.mp4"));
+        using var engine = NewEngine();
+        var notices = new List<string>();
+        engine.Notice += (_, m) => notices.Add(m);
+        await engine.InitializeAsync(CancellationToken.None);
+
+        _fs.EditPlaceholder("v.mp4", new byte[] { 4, 5, 6 });
+        await engine.ReconcileAsync(CancellationToken.None);
+
+        Assert.Equal(new byte[] { 4, 5, 6 }, _fs.Preserved["v.mp4"]);
+        Assert.True(_fs.Log.IndexOf("preserve v.mp4") < _fs.Log.IndexOf("update v.mp4 discard"));
+        Assert.Contains(notices, n => n.Contains("saved/v.mp4", StringComparison.Ordinal));
+        Assert.True(_fs.Entries["v.mp4"].InSync);
+    }
+
+    [Fact]
+    public async Task Edited_placeholder_is_not_reverted_when_its_bytes_cannot_be_saved()
+    {
+        _drive.Add(File("a", "v.mp4"));
+        using var engine = NewEngine();
+        await engine.InitializeAsync(CancellationToken.None);
+
+        _fs.EditPlaceholder("v.mp4", new byte[] { 4, 5, 6 });
+        _fs.PreserveFails.Add("v.mp4");
+        await engine.ReconcileAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(_fs.Log, l => l.StartsWith("update v.mp4", StringComparison.Ordinal));
+        Assert.False(_fs.Entries["v.mp4"].InSync);
+
+        _fs.PreserveFails.Clear();
+        await engine.ReconcileAsync(CancellationToken.None);
+        Assert.Contains("update v.mp4 discard", _fs.Log);
+        Assert.True(_fs.Preserved.ContainsKey("v.mp4"));
+    }
+
+    [Fact]
+    public async Task Edited_placeholder_removed_from_drive_is_preserved_before_delete()
+    {
+        _drive.Add(Folder("f", "Clips"), File("a", "v.mp4", parent: "f"));
+        using var engine = NewEngine();
+        await engine.InitializeAsync(CancellationToken.None);
+        _fs.EditPlaceholder("Clips/v.mp4", new byte[] { 7 });
+
+        _drive.PendingChanges.Enqueue(new ChangeBatch(new DriveChange[] { new DriveChange.Removed("f") }, null, "t1"));
+        await engine.PollAsync(CancellationToken.None);
+
+        Assert.Equal(new byte[] { 7 }, _fs.Preserved["Clips/v.mp4"]);
+        Assert.Empty(_fs.Entries);
+    }
+
+    [Fact]
+    public async Task Unmodified_dehydrated_placeholder_that_lost_in_sync_is_reverted_without_notice()
+    {
+        _drive.Add(File("a", "v.mp4"));
+        using var engine = NewEngine();
+        var notices = new List<string>();
+        engine.Notice += (_, m) => notices.Add(m);
+        await engine.InitializeAsync(CancellationToken.None);
+
+        _fs.Entries["v.mp4"] = _fs.Entries["v.mp4"] with { InSync = false }; // e.g. read-only attribute toggled
+        await engine.ReconcileAsync(CancellationToken.None);
+
+        Assert.Contains("update v.mp4 discard", _fs.Log);
+        Assert.Empty(_fs.Preserved);
+        Assert.Empty(notices);
     }
 }

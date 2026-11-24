@@ -40,8 +40,17 @@ public sealed class WindowsSyncHost : IAsyncDisposable
         SyncRootPath = AppPaths.SyncRoot(config);
         _auth = new GoogleAuthService(config, new DpapiTokenStore(AppPaths.TokenFile, config.AppId), openBrowser, loggers.CreateLogger("Auth"));
         _registrar = new SyncRootRegistrar(config, SyncRootPath, iconResource, loggers.CreateLogger("Registration"));
-        _placeholders = new CloudFilesPlaceholderSystem(SyncRootPath, loggers.CreateLogger("Placeholders"));
-        _provider = new CloudFilesProvider(new HydrationService(() => _drive, loggers.CreateLogger("Hydration")), loggers.CreateLogger("CloudFiles"));
+        _placeholders = new CloudFilesPlaceholderSystem(SyncRootPath, AppPaths.PreservedEditsFolder(config), loggers.CreateLogger("Placeholders"));
+        var hydration = new HydrationService(() => _drive, loggers.CreateLogger("Hydration"))
+        {
+            // Bad bytes must not stay in the local cache: flag the file so the next pass dehydrates it.
+            ChecksumMismatch = path =>
+            {
+                _placeholders.MarkNotInSync(path);
+                _watcher?.Poke();
+            },
+        };
+        _provider = new CloudFilesProvider(hydration, loggers.CreateLogger("CloudFiles"));
         _provider.ModificationRejected += (_, _) => OnRejected();
         _provider.LocalActivity += (_, _) => _watcher?.Poke();
     }
@@ -94,9 +103,14 @@ public sealed class WindowsSyncHost : IAsyncDisposable
     public async Task<string?> SignOutAsync(CancellationToken ct)
     {
         await StopAsync().ConfigureAwait(false);
+        // Any failure before UnregisterAll (a file in use, a read error) aborts the sign-out with nothing deleted.
         var rescued = RescueUnuploadedFiles();
+        // Decide what to delete while the placeholders can still be identified; anything else stays on disk.
+        var placeholderFiles = Directory.Exists(SyncRootPath)
+            ? _placeholders.Scan().Where(e => e.IsPlaceholder && !e.IsDirectory).Select(e => AppPaths.Full(SyncRootPath, e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         _registrar.UnregisterAll();
-        TryDeleteSyncRootFolder();
+        TryDeleteSyncRootFolder(placeholderFiles);
         await _auth.SignOutAsync(_credential, ct).ConfigureAwait(false);
         _credential = null;
         Email = null;
@@ -259,7 +273,8 @@ public sealed class WindowsSyncHost : IAsyncDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            _logger.LogWarning("Sync pass failed: {Error}", ex.Message);
+            _logger.LogWarning("Sync pass failed: {Error} (0x{HResult:X8})", ex.GetType().Name, ex.HResult);
+            _logger.LogDebug("Sync pass failed: {Message}", ex.Message);
         }
     }
 
@@ -271,7 +286,17 @@ public sealed class WindowsSyncHost : IAsyncDisposable
         }
 
         string? target = null;
-        foreach (var entry in _placeholders.Scan().Where(e => !e.IsPlaceholder && !e.IsDirectory))
+        var local = _placeholders.Scan();
+        // Placeholders edited in place (not in sync) keep their bytes too.
+        foreach (var entry in local.Where(e => e.IsPlaceholder && !e.IsDirectory && !e.InSync))
+        {
+            if (_placeholders.PreserveLocalChanges(entry) is { } saved)
+            {
+                target ??= Path.GetDirectoryName(saved);
+            }
+        }
+
+        foreach (var entry in local.Where(e => !e.IsPlaceholder && !e.IsDirectory))
         {
             target ??= Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -284,18 +309,18 @@ public sealed class WindowsSyncHost : IAsyncDisposable
         return target;
     }
 
-    private void TryDeleteSyncRootFolder()
+    /// <summary>Deletes the placeholder files found before unregistering and every folder left empty; keeps the rest.</summary>
+    private void TryDeleteSyncRootFolder(IReadOnlySet<string> placeholderFiles)
     {
         try
         {
             if (Directory.Exists(SyncRootPath))
             {
-                foreach (var file in Directory.EnumerateFiles(SyncRootPath, "*", SearchOption.AllDirectories))
+                var kept = CloudFilesPlaceholderSystem.DeletePlaceholderTree(SyncRootPath, placeholderFiles.Contains);
+                if (kept > 0)
                 {
-                    File.SetAttributes(file, FileAttributes.Normal);
+                    _logger.LogWarning("Kept {Count} local file(s) that were not Drive placeholders in the sync folder", kept);
                 }
-
-                Directory.Delete(SyncRootPath, recursive: true);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

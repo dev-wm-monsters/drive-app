@@ -29,5 +29,8 @@ public sealed record LocalEntry
     /// <summary>All data is local (no FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS / OFFLINE).</summary>
     public bool IsFullyHydrated { get; init; }
 
+    /// <summary>FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_SYSTEM (editor lock/backup files, shell metadata): never uploaded.</summary>
+    public bool IsHiddenOrSystem { get; init; }
+
     public string? FileId => Identity?.FileId;
 }

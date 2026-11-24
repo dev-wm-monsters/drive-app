@@ -264,6 +264,14 @@ public class SyncPlannerTests
     }
 
     [Fact]
+    public void Hidden_or_system_local_files_are_not_uploaded()
+    {
+        // Office/editor owner and backup files are often hidden and have no recognisable name (e.g. "8F3A2B10").
+        var plan = SyncPlanner.Plan(Tree(), new[] { UserFile("8F3A2B10") with { IsHiddenOrSystem = true } });
+        Assert.Empty(plan.Actions);
+    }
+
+    [Fact]
     public void Local_new_folder_is_reported_not_uploaded()
     {
         var plan = SyncPlanner.Plan(Tree(), new[] { new LocalEntry { Path = "MyFolder", IsDirectory = true }, UserFile("MyFolder/a.mp4") });
