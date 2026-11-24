@@ -1,0 +1,1 @@
+/home/user/drive-app/windows/src/DriveSync.Windows/obj/Release/net8.0-windows10.0.19041.0/Generated/CsWin32/Windows.Win32.NativeMethods.g.cs

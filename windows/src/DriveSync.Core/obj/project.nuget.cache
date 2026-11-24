@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "dgSpecHash": "Ed94eCFYCKyivBpLV6FC3iIhc83QgJUy5cgluYJ8S2a+S1YrgMYM2Sd2dbs792icH7HKVixv7ncylnNDDOYelA==",
+  "success": true,
+  "projectFilePath": "/home/user/drive-app/windows/src/DriveSync.Core/DriveSync.Core.csproj",
+  "expectedPackageFiles": [
+    "/root/.nuget/packages/google.apis/1.78.0/google.apis.1.78.0.nupkg.sha512",
+    "/root/.nuget/packages/google.apis.auth/1.78.0/google.apis.auth.1.78.0.nupkg.sha512",
+    "/root/.nuget/packages/google.apis.core/1.78.0/google.apis.core.1.78.0.nupkg.sha512",
+    "/root/.nuget/packages/google.apis.drive.v3/1.78.0.4327/google.apis.drive.v3.1.78.0.4327.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.extensions.configuration.abstractions/8.0.0/microsoft.extensions.configuration.abstractions.8.0.0.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.extensions.dependencyinjection.abstractions/8.0.2/microsoft.extensions.dependencyinjection.abstractions.8.0.2.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.extensions.logging.abstractions/8.0.3/microsoft.extensions.logging.abstractions.8.0.3.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.extensions.primitives/8.0.0/microsoft.extensions.primitives.8.0.0.nupkg.sha512",
+    "/root/.nuget/packages/newtonsoft.json/13.0.4/newtonsoft.json.13.0.4.nupkg.sha512",
+    "/root/.nuget/packages/system.codedom/7.0.0/system.codedom.7.0.0.nupkg.sha512",
+    "/root/.nuget/packages/system.management/7.0.2/system.management.7.0.2.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.windowsdesktop.app.ref/8.0.34/microsoft.windowsdesktop.app.ref.8.0.34.nupkg.sha512"
+  ],
+  "logs": []
+}
