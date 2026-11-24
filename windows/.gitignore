@@ -1,0 +1,10 @@
+# .NET build output — never commit
+bin/
+obj/
+publish/
+TestResults/
+artifacts/
+*.user
+*.suo
+.vs/
+*.binlog

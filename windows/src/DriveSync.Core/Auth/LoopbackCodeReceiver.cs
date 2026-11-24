@@ -69,7 +69,7 @@ public sealed class LoopbackCodeReceiver : ICodeReceiver, IDisposable
                 continue;
             }
 
-            var response = new AuthorizationCodeResponseUrl(query);
+            var response = new AuthorizationCodeResponseUrl(ParseQuery(query));
             if (!string.Equals(response.State, ExpectedState, StringComparison.Ordinal))
             {
                 await WriteResponseAsync(stream, "400 Bad Request", FailurePage, timeout.Token).ConfigureAwait(false);
@@ -102,6 +102,20 @@ public sealed class LoopbackCodeReceiver : ICodeReceiver, IDisposable
         }
 
         return requestTarget[(q + 1)..];
+    }
+
+    /// <summary>Decodes application/x-www-form-urlencoded pairs (codes look like "4/0A…" and arrive as "4%2F0A…").</summary>
+    internal static Dictionary<string, string> ParseQuery(string query)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = pair.Split('=', 2);
+            static string Decode(string s) => Uri.UnescapeDataString(s.Replace('+', ' '));
+            result[Decode(kv[0])] = kv.Length > 1 ? Decode(kv[1]) : string.Empty;
+        }
+
+        return result;
     }
 
     public void Dispose() => _listener.Stop();

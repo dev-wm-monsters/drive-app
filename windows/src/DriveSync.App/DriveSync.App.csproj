@@ -1,9 +1,30 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Tray app (WinForms). TFM carries the Windows SDK version because it references DriveSync.Windows, which needs the
+    Windows.Storage.Provider WinRT projection (StorageProviderSyncRootManager); a plain net10.0-windows project can't
+    reference a 10.0.19041 one. AssemblyName stays DriveSync.App (installer/CI rely on DriveSync.App.exe).
+  -->
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>DriveSync.App</AssemblyName>
+    <RootNamespace>DriveSync.App</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
   </PropertyGroup>
-
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.15" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DriveSync.Core\DriveSync.Core.csproj" />
+    <ProjectReference Include="..\DriveSync.Windows\DriveSync.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- CI overwrites Google:ClientId/ClientSecret and Drive:SharedDriveName/FolderId in the PUBLISHED copy. -->
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

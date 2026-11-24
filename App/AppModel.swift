@@ -151,7 +151,7 @@ final class AppModel {
         do {
             try await DomainController.remove()
         } catch {
-            Log.domain.error("Removing the domain failed: \(String(describing: error), privacy: .public)")
+            Log.domain.error("Removing the domain failed: \(Log.code(of: error), privacy: .public)")
         }
         if let services {
             await services.auth.signOut()
@@ -226,7 +226,7 @@ final class AppModel {
                 do {
                     try await DomainController.signalWorkingSet()
                 } catch {
-                    Log.domain.error("signalEnumerator failed: \(String(describing: error), privacy: .public)")
+                    Log.domain.error("signalEnumerator failed: \(Log.code(of: error), privacy: .public)")
                 }
                 // Give the extension a moment to finish before reading its status.
                 try? await Task.sleep(for: .seconds(3))
@@ -290,7 +290,7 @@ final class AppModel {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 do {
-                    _ = try await services.client.upload(file: url, desiredName: name, parentID: root.id) { sent, total in
+                    _ = try await services.client.upload(file: url, desiredName: name, parentID: root.id, root: root) { sent, total in
                         let fraction = total > 0 ? Double(sent) / Double(total) : 0
                         Task { @MainActor [weak self] in self?.setUploadFraction(fraction, index: offset + 1) }
                     }

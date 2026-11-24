@@ -135,6 +135,17 @@ public actor DriveClient {
     /// Downloads the whole file to a temp file in `file`'s directory, verifies `expectedMD5` (if given), then
     /// atomically renames it over `file`. On any failure the temp file is removed and `file` is untouched.
     public func download(id: String, to file: URL, expectedMD5: String?) async throws(DriveError) {
+        try await download(id: id, to: file, expectedMD5: expectedMD5, progress: nil)
+    }
+
+    /// As `download(id:to:expectedMD5:)`, reporting `(bytesReceived, expectedTotal or nil)` while downloading
+    /// (when the transport supports it; a retry starts again from 0).
+    public func download(
+        id: String,
+        to file: URL,
+        expectedMD5: String?,
+        progress: (@Sendable (Int64, Int64?) -> Void)?
+    ) async throws(DriveError) {
         let fm = FileManager.default
         let temp = file.deletingLastPathComponent()
             .appendingPathComponent(".\(file.lastPathComponent).\(UUID().uuidString).download")
@@ -143,7 +154,7 @@ public actor DriveClient {
         let transport = self.transport
         _ = try await perform(request) { req in
             try? fm.removeItem(at: temp)
-            let response = try await transport.download(for: req, to: temp)
+            let response = try await transport.download(for: req, to: temp, progress: progress)
             if (200..<300).contains(response.statusCode) { return (Data(), response) }
             let body = (try? Data(contentsOf: temp)) ?? Data()
             try? fm.removeItem(at: temp)
@@ -278,6 +289,20 @@ public actor DriveClient {
         parentID: String,
         progress: (@Sendable (Int64, Int64) -> Void)?
     ) async throws(DriveError) -> DriveFile {
+        try await upload(file: file, desiredName: desiredName, parentID: parentID, root: currentRoot, progress: progress)
+    }
+
+    /// As `upload(file:desiredName:parentID:progress:)`, with the root given explicitly. Without it the free-name
+    /// sibling listing is only scoped to the shared drive (`corpora=drive&driveId=`) if this client already saw the
+    /// root (`resolveRoot`, `listChildren`, `changes`), which is not the case when the root came from a cache.
+    public func upload(
+        file: URL,
+        desiredName: String,
+        parentID: String,
+        root: DriveRoot?,
+        progress: (@Sendable (Int64, Int64) -> Void)?
+    ) async throws(DriveError) -> DriveFile {
+        if let root { remember(root) }
         let total = try Self.fileSize(file)
         let siblings = try await listFiles(
             q: "'\(Self.escapeQuery(parentID))' in parents and trashed = false",

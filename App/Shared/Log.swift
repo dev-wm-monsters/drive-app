@@ -22,4 +22,12 @@ enum Log {
     static let provider = Logger(subsystem: subsystem, category: "fileprovider")
     static let enumeration = Logger(subsystem: subsystem, category: "enumeration")
     static let transfer = Logger(subsystem: subsystem, category: "transfer")
+
+    /// "<domain> <code>" for errors from Foundation/FileProvider: their
+    /// descriptions can carry file paths (user and file names) or URLs, so
+    /// only this is logged at public level.
+    static func code(of error: any Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain) \(ns.code)"
+    }
 }

@@ -123,7 +123,8 @@ struct APIFile: Decodable {
     var capabilities: Caps?
 
     func toDriveFile() throws(DriveError) -> DriveFile {
-        guard let name, let mimeType else { throw .invalidResponse("file \(id) lacks name/mimeType") }
+        // No file ID in the message: DriveError descriptions are logged at public level.
+        guard let name, let mimeType else { throw .invalidResponse("file lacks name/mimeType") }
         var created = Date(timeIntervalSince1970: 0)
         if let createdTime { created = try RFC3339.parseOrThrow(createdTime) }
         var modified = created

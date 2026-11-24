@@ -56,6 +56,7 @@ public class SyncEngineTests
         await engine.ReconcileAsync(CancellationToken.None);
         await engine.WhenUploadsIdleAsync();
         Assert.Empty(_drive.Uploads); // not stable yet
+        Assert.True(engine.HasFilesWaitingToSettle);
 
         _now = _now.AddSeconds(5);
         await engine.ReconcileAsync(CancellationToken.None);

@@ -21,14 +21,18 @@ enum DomainController {
     }
 
     /// Removes the domain and its replicated files (they live on Drive).
+    /// Dirty user data (files added locally whose upload has not finished)
+    /// is preserved by the system instead of being deleted with the domain.
     static func remove() async throws {
         guard let domain = try await registeredDomain() else { return }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            NSFileProviderManager.remove(domain.value) { @Sendable error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        let preserved = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, any Error>) in
+            NSFileProviderManager.remove(domain.value, mode: .preserveDirtyUserData) { @Sendable preservedLocation, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: preservedLocation != nil) }
             }
         }
-        Log.domain.info("Domain removed")
+        // VERIFY-ON-MAC: where the system puts preserved files (a folder the
+        // user can find); the location itself is not logged (it holds the home path).
+        Log.domain.info("Domain removed\(preserved ? "; unsynced local files were preserved" : "", privacy: .public)")
     }
 
     static func isRegistered() async -> Bool {

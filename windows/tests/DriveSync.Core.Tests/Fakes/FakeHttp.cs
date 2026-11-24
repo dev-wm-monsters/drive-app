@@ -15,7 +15,21 @@ internal sealed class FakeHttpHandler : HttpMessageHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+        string? body = null;
+        if (request.Content is not null)
+        {
+            var bytes = await request.Content.ReadAsByteArrayAsync(cancellationToken);
+            if (request.Content.Headers.ContentEncoding.Contains("gzip"))
+            {
+                using var gz = new System.IO.Compression.GZipStream(new MemoryStream(bytes), System.IO.Compression.CompressionMode.Decompress);
+                using var plain = new MemoryStream();
+                await gz.CopyToAsync(plain, cancellationToken);
+                bytes = plain.ToArray();
+            }
+
+            body = Encoding.UTF8.GetString(bytes);
+        }
+
         Requests.Add((request.Method, request.RequestUri!, body, request));
         var response = _respond(request, body);
         response.RequestMessage ??= request;

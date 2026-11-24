@@ -36,6 +36,28 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         super.init()
         Log.provider.info("Extension started for domain \(domain.identifier.rawValue, privacy: .public)")
+        Self.removeStaleTemporaryFiles(domain: domain)
+    }
+
+    /// fetchContents hands the system files in the domain's temporary
+    /// directory; after a crash some may be left behind ("The extension is
+    /// then responsible for deleting that file"). Only files older than a day
+    /// are removed, so downloads of other live instances are never touched.
+    private static func removeStaleTemporaryFiles(domain: NSFileProviderDomain) {
+        guard let manager = NSFileProviderManager(for: domain),
+              let directory = try? manager.temporaryDirectoryURL()
+        else { return }
+        Task.detached(priority: .background) {
+            let fm = FileManager.default
+            let cutoff = Date().addingTimeInterval(-24 * 3600)
+            let keys: [URLResourceKey] = [.contentModificationDateKey]
+            guard let entries = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys) else { return }
+            for entry in entries {
+                if let modified = try? entry.resourceValues(forKeys: Set(keys)).contentModificationDate, modified < cutoff {
+                    try? fm.removeItem(at: entry)
+                }
+            }
+        }
     }
 
     func invalidate() {
@@ -85,7 +107,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     // MARK: Download
 
     func fetchContents(for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?, request: NSFileProviderRequest, completionHandler: @escaping (URL?, NSFileProviderItem?, (any Error)?) -> Void) -> Progress {
-        let progress = Progress(totalUnitCount: 100)
+        let progress = Progress(totalUnitCount: 1)
         let done = Once<(URL?, NSFileProviderItem?, (any Error)?)> { completionHandler($0.0, $0.1, $0.2) }
         let core: ProviderCore
         let temporaryDirectory: URL
@@ -108,13 +130,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let (file, item) = try await core.fileAndItem(identifier: id)
                 guard !file.isFolder else { throw FileProviderErrors.unsupported }
                 guard file.canDownload else { throw CocoaError(.fileReadNoPermission) }
-                // DriveCore's download has no byte-progress callback; the
-                // progress stays indeterminate until the file is complete.
-                // VERIFY-ON-MAC: Finder shows a spinner, not a bar, meanwhile.
+                // Byte progress, so the system sees a long download advancing
+                // ("will interrupt the call if it stops making progress").
+                // VERIFY-ON-MAC: Finder shows a progress bar for a large file.
+                let size = max(file.size ?? 0, 1)
+                progressBox.value.totalUnitCount = size
                 progressBox.value.completedUnitCount = 0
-                try await core.services.client.download(id: file.id, to: destination, expectedMD5: file.md5Checksum)
+                try await core.services.client.download(id: file.id, to: destination, expectedMD5: file.md5Checksum) { received, total in
+                    let p = progressBox.value
+                    if let total, total > 0, p.totalUnitCount != total { p.totalUnitCount = total }
+                    p.completedUnitCount = min(received, p.totalUnitCount)
+                }
                 try Task.checkCancellation()
-                progressBox.value.completedUnitCount = 100
+                progressBox.value.completedUnitCount = progressBox.value.totalUnitCount
                 Log.transfer.info("Downloaded \(file.id, privacy: .private)")
                 if !done((destination, item, nil)) {
                     try? FileManager.default.removeItem(at: destination)
@@ -147,7 +175,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // template identifier, which we accept (unknown item).
         // VERIFY-ON-MAC: Finder "New Folder" in the domain leaves a local,
         // "not synced" folder (rather than an error dialog or a deletion).
-        if type.conforms(to: .directory) || type.conforms(to: .symbolicLink) || parentIdentifier == NSFileProviderItemIdentifier.trashContainer.rawValue {
+        if type.conforms(to: .directory) || type.conforms(to: .symbolicLink)
+            || parentIdentifier == NSFileProviderItemIdentifier.trashContainer.rawValue
+            || Self.isLocalOnlyName(filename) {
             Log.provider.info("Excluding a new non-file item from sync")
             done((nil, [], false, NSFileProviderError(.excludedFromSync)))
             return progress
@@ -196,6 +226,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         return progress
     }
 
+    /// Files that Finder and editors create next to documents (view settings,
+    /// AppleDouble, Office/LibreOffice lock files). Uploading them would
+    /// publish them to every user of the shared drive; they stay local.
+    static func isLocalOnlyName(_ name: String) -> Bool {
+        name == ".DS_Store" || name == "Icon\r" || name.hasPrefix("._")
+            || name.hasPrefix("~$") || name.hasPrefix(".~lock.")
+    }
+
     // MARK: Modify (rejected: roll back to the server state)
 
     func modifyItem(_ item: NSFileProviderItem, baseVersion version: NSFileProviderItemVersion, changedFields: NSFileProviderItemFields, contents newContents: URL?, options: NSFileProviderModifyItemOptions = [], request: NSFileProviderRequest, completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, (any Error)?) -> Void) -> Progress {
@@ -204,6 +242,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completionHandler($0.0, $0.1, $0.2, $0.3)
         }
         let id = item.itemIdentifier.rawValue
+        // Local-only metadata (last used date, tags, xattrs, flags, dates):
+        // nothing to send to Drive. Returning the fields as still pending,
+        // identical to changedFields, marks them unsupported, so the system
+        // stops sending them and never needs the network for them (e.g.
+        // opening a downloaded file offline updates lastUsedDate).
+        let structural: NSFileProviderItemFields = [.contents, .filename, .parentItemIdentifier]
+        if changedFields.isDisjoint(with: structural) {
+            done((item, changedFields, false, nil))
+            return progress
+        }
         let core: ProviderCore
         do { core = try self.core.get() } catch {
             done((nil, [], false, FileProviderErrors.map(error)))
@@ -218,9 +266,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // VERIFY-ON-MAC: a rename/move/edit from Terminal is reverted on disk
         // (and the edited content re-downloaded) without a conflict copy.
         let refetch = changedFields.contains(.contents)
-        if changedFields.contains(.contents) || changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
-            Log.provider.info("Rolling back a local change to a read-only item")
-        }
+        Log.provider.info("Rolling back a local change to a read-only item")
         startTask(for: progress, onCancel: { done((nil, [], false, FileProviderErrors.cancelled)) }) {
             do {
                 let current = try await core.item(identifier: id)
@@ -247,24 +293,39 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             return progress
         }
         let id = identifier.rawValue
+        // Excluded local items carry a system template identifier, never a
+        // Drive file ID: unknown to us, so the deletion succeeds without a
+        // network round trip.
+        guard Self.isDriveFileID(id) else {
+            done(nil)
+            return progress
+        }
         startTask(for: progress, onCancel: { done(FileProviderErrors.cancelled) }) {
             // deletionRejected makes the system re-create the item on disk.
-            // Unknown items (already deleted remotely, or excluded local items
-            // carrying a system template identifier) must report success.
+            // Items Drive does not know (already deleted remotely) must report
+            // success. Anything else (offline, garbled response) is NOT a
+            // confirmation that the item is gone, so it is not reported as one.
             do {
                 _ = try await core.item(identifier: id)
                 Log.provider.info("Rejecting deletion of a read-only item")
                 done(NSFileProviderError(.deletionRejected))
             } catch {
                 switch DriveError.from(error) {
-                case .notFound, .server(400), .invalidResponse:
+                case .notFound:
                     done(nil)
+                case .invalidResponse(let detail) where detail.hasPrefix("HTTP 400"):
+                    done(nil)   // Drive rejects the ID itself
                 default:
                     done(FileProviderErrors.map(error))
                 }
             }
         }
         return progress
+    }
+
+    /// Drive file IDs are URL-safe base64-like strings.
+    static func isDriveFileID(_ id: String) -> Bool {
+        !id.isEmpty && id.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_" }
     }
 
     // MARK: Thumbnails

@@ -80,11 +80,15 @@ public actor AuthSession {
         if let task = refreshTask {
             return try await Self.value(of: task)
         }
-        if !force, let stored = (try? store.load()) ?? nil, isFresh(stored) {
+        // The other process (app or File Provider extension) shares the store: it may have refreshed already, or
+        // signed in again with a new refresh token. Adopt fresh stored tokens unless they are the ones just
+        // rejected (force), and refresh with the stored refresh token when there is one.
+        let stored = (try? store.load()) ?? nil
+        if let stored, isFresh(stored), !force || stored.accessToken != tokens?.accessToken {
             tokens = stored
             return stored
         }
-        guard let current = tokens else { throw .needsLogin }
+        guard let current = stored ?? tokens else { throw .needsLogin }
         let client = self.client
         let task = Task { () async throws -> OAuthTokens in
             try await client.refresh(current)
@@ -103,7 +107,11 @@ public actor AuthSession {
             if refreshTask == task { refreshTask = nil }
             if e == .needsLogin, gen == generation {
                 tokens = nil
-                try? store.clear()
+                // Only wipe the tokens that failed: the other process may have stored a new sign-in meanwhile.
+                let now = (try? store.load()) ?? nil
+                if now == nil || now?.refreshToken == current.refreshToken {
+                    try? store.clear()
+                }
             }
             throw e
         }

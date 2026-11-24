@@ -52,6 +52,9 @@ public sealed class SyncEngine : IDisposable
 
     public SyncStatus Status { get; private set; } = new(SyncState.Starting, "Starting…");
 
+    /// <summary>True when the last pass saw new local files that are not stable yet (the host re-checks soon).</summary>
+    public bool HasFilesWaitingToSettle { get; private set; }
+
     public event EventHandler<SyncStatus>? StatusChanged;
 
     /// <summary>One-off messages for the user (balloon tips): skipped folders, failed uploads…</summary>
@@ -61,19 +64,20 @@ public sealed class SyncEngine : IDisposable
     public event EventHandler<string>? Uploaded;
 
     /// <summary>Resolves the root, takes a change token, lists the whole tree and reconciles.</summary>
-    public async Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken) =>
+        RunExclusiveAsync(InitializeCoreAsync, cancellationToken);
+
+    private async Task InitializeCoreAsync(CancellationToken ct)
     {
-        await RunExclusiveAsync(async ct =>
-        {
-            SetStatus(SyncState.Syncing, "Listing Drive…");
-            var root = await _drive.ResolveRootAsync(ct).ConfigureAwait(false);
-            // Take the token BEFORE listing so changes made during the listing are replayed, not lost.
-            _pageToken = await _drive.GetStartPageTokenAsync(root, ct).ConfigureAwait(false);
-            Root = root;
-            Tree = new RemoteTree(root);
-            await ListMissingFoldersAsync(ct).ConfigureAwait(false);
-            await ReconcileCoreAsync(ct).ConfigureAwait(false);
-        }, cancellationToken).ConfigureAwait(false);
+        SetStatus(SyncState.Syncing, "Listing Drive…");
+        var root = await _drive.ResolveRootAsync(ct).ConfigureAwait(false);
+        // Take the token BEFORE listing so changes made during the listing are replayed, not lost.
+        var pageToken = await _drive.GetStartPageTokenAsync(root, ct).ConfigureAwait(false);
+        Root = root;
+        Tree = new RemoteTree(root);
+        await ListMissingFoldersAsync(ct).ConfigureAwait(false);
+        _pageToken = pageToken;
+        await ReconcileCoreAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>Fetches Drive changes since the last token, then reconciles. Called every 30 s and by "Sync now".</summary>
@@ -83,6 +87,8 @@ public sealed class SyncEngine : IDisposable
         {
             if (Tree is null || Root is null || _pageToken is null)
             {
+                // The initial listing failed (offline at startup): retry it instead of polling.
+                await InitializeCoreAsync(ct).ConfigureAwait(false);
                 return;
             }
 
@@ -178,7 +184,19 @@ public sealed class SyncEngine : IDisposable
             inFlight = new HashSet<string>(_uploadsInFlight, SyncPath.Comparer);
         }
 
-        var plan = SyncPlanner.Plan(Tree, local, e => !inFlight.Contains(e.Path) && _stability.IsStable(e, now));
+        var waiting = false;
+        var plan = SyncPlanner.Plan(Tree, local, e =>
+        {
+            if (inFlight.Contains(e.Path))
+            {
+                return false;
+            }
+
+            var stable = _stability.IsStable(e, now);
+            waiting |= !stable;
+            return stable;
+        });
+        HasFilesWaitingToSettle = waiting;
         foreach (var warning in plan.Warnings)
         {
             if (_reportedWarnings.Add(warning))

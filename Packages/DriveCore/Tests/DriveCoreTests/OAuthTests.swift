@@ -200,6 +200,34 @@ final class OAuthTests: XCTestCase {
         XCTAssertTrue(h.transport.requests.isEmpty)
     }
 
+    func testInvalidGrantKeepsNewSignInSavedByOtherProcess() async throws {
+        let h = Harness()
+        _ = try await h.auth.accessToken() // cache at-1 / rt-1
+        h.clock.advance(3600)
+        let store = h.store
+        let clock = h.clock
+        // While this refresh (with the revoked rt-1) is in flight, the other process signs in again.
+        h.transport.on(isToken) { _ in
+            try store.save(OAuthTokens(accessToken: "at-new", refreshToken: "rt-new", expiresAt: clock.now.addingTimeInterval(3600), email: nil))
+            return .json(400, #"{"error":"invalid_grant"}"#)
+        }
+        // The stored rt-1 is used for the refresh: invalid_grant, but the new sign-in survives.
+        try store.save(OAuthTokens(accessToken: "at-1", refreshToken: "rt-1", expiresAt: h.clock.now, email: nil))
+        await expectError(.needsLogin) { try await h.auth.accessToken() }
+        XCTAssertEqual(try store.load()?.refreshToken, "rt-new")
+        let t = try await h.auth.accessToken()
+        XCTAssertEqual(t, "at-new")
+    }
+
+    func testForceRefreshAdoptsTokenRefreshedByOtherProcess() async throws {
+        let h = Harness()
+        _ = try await h.auth.accessToken() // cache at-1
+        try h.store.save(OAuthTokens(accessToken: "at-other", refreshToken: "rt-1", expiresAt: h.clock.now.addingTimeInterval(3600), email: nil))
+        let t = try await h.auth.forceRefresh(rejecting: "at-1")
+        XCTAssertEqual(t, "at-other")
+        XCTAssertTrue(h.transport.requests.isEmpty)
+    }
+
     func testSignedOutNeedsLoginAndSignInFlow() async throws {
         let h = Harness(signedIn: false)
         await expectError(.needsLogin) { try await h.auth.accessToken() }

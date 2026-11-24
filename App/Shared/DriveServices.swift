@@ -40,7 +40,10 @@ extension DriveError {
         if let e = error as? URLError {
             return e.code == .cancelled ? .cancelled : .network(e.localizedDescription)
         }
-        return .invalidResponse(String(describing: error))
+        // Not String(describing:): Cocoa errors carry paths/URLs in userInfo,
+        // and this text is logged at public level.
+        let ns = error as NSError
+        return .invalidResponse("\(ns.domain) \(ns.code)")
     }
 
     /// Short user-facing explanation, with guidance for root problems.

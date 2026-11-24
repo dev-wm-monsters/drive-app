@@ -86,7 +86,7 @@ actor ItemIndex {
             try data.write(to: fileURL, options: .atomic)
             dirty = false
         } catch {
-            Log.enumeration.error("Saving item index failed: \(String(describing: error), privacy: .public)")
+            Log.enumeration.error("Saving item index failed: \(Log.code(of: error), privacy: .public)")
         }
     }
 

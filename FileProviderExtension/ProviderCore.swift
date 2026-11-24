@@ -92,17 +92,30 @@ final class ProviderCore: Sendable {
     func items(inContainer identifier: String) async throws(DriveError) -> [FileProviderItem] {
         let root = try await root()
         let folderID = Self.driveID(for: identifier, root: root)
+        // The system also opens enumerators on documents (live updates for
+        // one file). A file has no children; never record it as a listed folder.
+        if await isKnownFile(folderID) { return [] }
         let result = try await listFolder(driveID: folderID, root: root, markEnumerated: true)
         await saveIndex(root: root)
         Log.enumeration.debug("Listed \(result.items.count, privacy: .public) items in \(folderID, privacy: .private)")
         return result.items
     }
 
-    /// Working-set items: everything in the folders the system has listed.
-    func workingSetItems() async throws(DriveError) -> [FileProviderItem] {
+    /// Folders listed per working-set page: each is one or more Drive calls,
+    /// and a page should take seconds, not minutes (header: "not expected to
+    /// take more than a few seconds to complete the enumeration of a page").
+    static let workingSetFoldersPerPage = 10
+
+    /// Working-set items: everything in the folders the system has listed,
+    /// `workingSetFoldersPerPage` folders (sorted by ID) per page starting at
+    /// `offset`. `nextOffset` is nil on the last page.
+    func workingSetItems(offset: Int) async throws(DriveError) -> (items: [FileProviderItem], nextOffset: Int?) {
         let root = try await root()
+        let folders = await index.enumeratedFolders.sorted()
+        let start = min(max(offset, 0), folders.count)
+        let end = min(start + Self.workingSetFoldersPerPage, folders.count)
         var all: [FileProviderItem] = []
-        for folderID in await index.enumeratedFolders.sorted() {
+        for folderID in folders[start..<end] {
             do {
                 all += try await listFolder(driveID: folderID, root: root, markEnumerated: true).items
             } catch .notFound {
@@ -110,7 +123,7 @@ final class ProviderCore: Sendable {
             }
         }
         await saveIndex(root: root)
-        return all
+        return (all, end < folders.count ? end : nil)
     }
 
     /// For folder enumerators: a fresh listing reported as changes. Always
@@ -119,6 +132,9 @@ final class ProviderCore: Sendable {
         let root = try await root()
         let anchor = try await currentAnchor(root: root)
         let folderID = Self.driveID(for: identifier, root: root)
+        if await isKnownFile(folderID) {
+            return ChangeSet(updated: [], deleted: [], nextAnchor: anchor, moreComing: false)
+        }
         let result = try await listFolder(driveID: folderID, root: root, markEnumerated: true)
         await saveIndex(root: root)
         // Deletions are global: only report items that left the tree, not
@@ -128,6 +144,11 @@ final class ProviderCore: Sendable {
             deleted.append(id)
         }
         return ChangeSet(updated: result.items, deleted: deleted, nextAnchor: anchor, moreComing: false)
+    }
+
+    private func isKnownFile(_ id: String) async -> Bool {
+        if let entry = await index.entry(id) { return !entry.isFolder }
+        return false
     }
 
     // MARK: Single items
@@ -181,7 +202,9 @@ final class ProviderCore: Sendable {
     func upload(contents: URL, desiredName: String, parentIdentifier: String, progress: (@Sendable (Int64, Int64) -> Void)?) async throws(DriveError) -> FileProviderItem {
         let root = try await root()
         let parentID = Self.driveID(for: parentIdentifier, root: root)
-        let created = try await client.upload(file: contents, desiredName: desiredName, parentID: parentID, progress: progress)
+        // Passing the root scopes the free-name sibling listing to the shared
+        // drive (corpora=drive) even when the root came from the cache.
+        let created = try await client.upload(file: contents, desiredName: desiredName, parentID: parentID, root: root, progress: progress)
         Log.transfer.info("Uploaded \(created.id, privacy: .private) to \(parentID, privacy: .private)")
         // The upload picked a free name, so the display name normally equals it;
         // compute it from the real listing anyway so all paths agree.
@@ -226,7 +249,15 @@ final class ProviderCore: Sendable {
               anchor.rootID == root.id, !anchor.token.isEmpty
         else { throw AnchorProblem.expired }
 
-        let batch = try await client.changes(since: anchor.token, root: root)
+        let batch: ChangeBatch
+        do {
+            batch = try await client.changes(since: anchor.token, root: root)
+        } catch .invalidResponse(let detail) where detail.hasPrefix("HTTP 400") || detail.hasPrefix("HTTP 410") {
+            // Drive rejects an invalid/expired page token with 400 (DriveClient
+            // reports it as invalidResponse, not .server): re-sync instead of
+            // retrying the same token forever.
+            throw AnchorProblem.expired
+        }
 
         var affectedParents: Set<String> = []
         var deleted: Set<String> = []

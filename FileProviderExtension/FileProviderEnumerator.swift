@@ -41,24 +41,37 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
         let observerBox = UncheckedBox(observer)
         let kind = self.kind
         let core = self.core
+        let pageData = page.rawValue
         tasks.run {
             do {
                 let items: [FileProviderItem]
+                var nextPage: NSFileProviderPage?
                 switch kind {
-                case .folder(let id): items = try await core.items(inContainer: id)
-                case .workingSet: items = try await core.workingSetItems()
+                case .folder(let id):
+                    items = try await core.items(inContainer: id)
+                case .workingSet:
+                    let result = try await core.workingSetItems(offset: Self.workingSetOffset(from: pageData))
+                    items = result.items
+                    nextPage = result.nextOffset.map { NSFileProviderPage(rawValue: Data("ws:\($0)".utf8)) }
                 }
                 try Task.checkCancellation()
                 for start in stride(from: 0, to: items.count, by: Self.batchSize) {
                     let slice = items[start..<min(start + Self.batchSize, items.count)]
                     observerBox.value.didEnumerate(Array(slice))
                 }
-                observerBox.value.finishEnumerating(upTo: nil)
+                observerBox.value.finishEnumerating(upTo: nextPage)
             } catch {
                 Log.enumeration.error("enumerateItems failed: \(String(describing: DriveError.from(error)), privacy: .public)")
                 observerBox.value.finishEnumeratingWithError(FileProviderErrors.map(error))
             }
         }
+    }
+
+    /// Our working-set pages are "ws:<folder offset>"; the system's initial
+    /// pages (sorted by date / name) start at 0.
+    static func workingSetOffset(from page: Data) -> Int {
+        guard let text = String(data: page, encoding: .utf8), text.hasPrefix("ws:") else { return 0 }
+        return Int(text.dropFirst(3)) ?? 0
     }
 
     // MARK: Changes

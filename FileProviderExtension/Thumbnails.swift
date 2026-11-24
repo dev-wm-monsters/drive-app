@@ -13,7 +13,7 @@ extension ProviderCore {
         let id = Self.driveID(for: identifier, root: root)
         guard id != root.id else { return nil }
         let file = try await services.client.file(id: id)
-        guard !file.isFolder, let link = file.thumbnailLink else { return nil }
+        guard !file.isFolder, let link = file.thumbnailLink, Self.isGoogleHost(link) else { return nil }
 
         var request = URLRequest(url: Self.sized(link, maxPixels: maxPixels))
         request.timeoutInterval = 20
@@ -29,6 +29,13 @@ extension ProviderCore {
         }
         guard !data.isEmpty, data.count <= Self.maxThumbnailBytes else { return nil }
         return data
+    }
+
+    /// The bearer token is only ever sent to Google over HTTPS
+    /// (thumbnailLink is normally https://lh3.googleusercontent.com/...).
+    static func isGoogleHost(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else { return false }
+        return ["googleusercontent.com", "google.com", "googleapis.com"].contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
     /// Drive thumbnail links end in "=s<px>" (e.g. "=s220"); ask for the
