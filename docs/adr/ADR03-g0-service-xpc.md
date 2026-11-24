@@ -1,6 +1,6 @@
 # ADR03 Single storage service: G0 service and XPC arrangement
 
-Draft v0.1 | 16 November 2026 | Status: **Proposed — pending G0 evidence**
+Draft v0.1 | 16 November 2026 | Status: **Superseded by [ADR09](ADR09-file-provider-and-cloud-files.md) on branch `claude/shared-drive-sync`** (was: Proposed — pending G0 evidence)
 
 Detail record for ADR03 in [04 Architecture](../04-architecture.md). It does not change ADR03; it states exactly what B01 must prove before the single-service design is accepted. No part of this arrangement has run on macOS 26 yet.
 

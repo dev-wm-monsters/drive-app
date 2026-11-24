@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:driveapp:validation:result:v1",
   "title": "DriveApp validation result",
-  "description": "One result.json per validation/<BUILD>/<OS>/<TEST_ID>/ directory (docs/05-test-plan.md, Evidence layout). Written by scripts/b01-spike.sh or by hand for manual procedures.",
+  "description": "One result.json per validation/<BUILD>/<OS>/<TEST_ID>/ directory (validation/README.md). Written by a script or by hand for manual procedures.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -24,14 +24,14 @@
     "schemaVersion": { "const": 1 },
     "testId": {
       "type": "string",
-      "pattern": "^G[0-3]-[A-Z0-9]+(-[A-Z0-9]+)*$|^T[0-9]{2}(-[A-Z0-9]+)*$",
-      "description": "Gate test ID such as G0-MOUNT, or a test-plan ID such as T03."
+      "pattern": "^SD-AT[0-9]{2}$|^G[0-3]-[A-Z0-9]+(-[A-Z0-9]+)*$|^T[0-9]{2}(-[A-Z0-9]+)*$",
+      "description": "Shared-drive acceptance test such as SD-AT05 (docs/14), a gate test such as G1-X, or a test-plan ID such as T03."
     },
-    "gate": { "enum": ["G0", "G1", "G2", "G3"] },
+    "gate": { "enum": ["SD", "G0", "G1", "G2", "G3"] },
     "title": { "type": "string", "minLength": 1 },
     "requirements": {
       "type": "array",
-      "items": { "type": "string", "pattern": "^N?FR[0-9]{2}$" },
+      "items": { "type": "string", "pattern": "^(SD-)?N?FR[0-9]{2}$" },
       "uniqueItems": true
     },
     "status": { "enum": ["pass", "fail", "blocked"] },
@@ -86,7 +86,7 @@
     "g0Verify": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Platform assumptions this test must confirm on macOS 26 (G0-VERIFY)."
+      "description": "Platform assumptions this test must confirm on the target OS."
     },
     "recordedBy": { "type": "string" }
   },
@@ -98,6 +98,10 @@
     {
       "if": { "properties": { "testId": { "pattern": "^G0-" } } },
       "then": { "properties": { "gate": { "const": "G0" } } }
+    },
+    {
+      "if": { "properties": { "testId": { "pattern": "^SD-" } } },
+      "then": { "properties": { "gate": { "const": "SD" } } }
     }
   ]
 }

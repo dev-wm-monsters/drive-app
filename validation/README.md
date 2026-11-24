@@ -1,41 +1,54 @@
 # Validation evidence
 
-Draft v0.1 | 16 November 2026 | Evidence store
+Draft v0.2 | 24 November 2026 | Branch `claude/shared-drive-sync`
 
-Saved results for gate tests and test-plan runs. The layout follows [05 Test plan › Evidence layout](../docs/05-test-plan.md#evidence-layout). The G0 procedure is in [13 B01 G0 runbook](../docs/13-b01-g0-runbook.md).
+Saved results of the manual acceptance tests SD-AT01…SD-AT15 in [14 Shared-drive sync](../docs/14-shared-drive-sync.md#manual-acceptance-tests). Nothing has been recorded yet.
 
 ## Layout
 
 ```
 validation/
-  result.schema.json                 JSON Schema (Draft 2020-12) for every result.json
-  <BUILD>/<OS>/
-    g0-summary.json                  per-criterion roll-up and G0 decision (scripts/b01-spike.sh collect)
-    <TEST_ID>/
-      result.json                    status, expected, observed, command, timestamps
-      fixture-manifest.json          fixture-check manifest (paths, sizes, SHA-256, generator seed)
-      logs/driveapp.log.txt          redacted: log show --predicate 'subsystem BEGINSWITH "com.wakeupmonster.driveapp"'
-      logs/fskit.log.txt             redacted FSKit/fskitd log for the same time window
-      …                              test-specific artifacts listed in result.json "artifacts"
+  result.schema.json        JSON Schema (Draft 2020-12) for every result.json
+  <BUILD>/<OS>/<TEST_ID>/
+    result.json             status, expected, observed, procedure, timestamps
+    logs/…                  redacted app logs for the test window
+    …                       screenshots, timings, checksums (listed in "artifacts")
 ```
 
 | Part | Value |
 | --- | --- |
-| BUILD | `<CFBundleShortVersionString>-<CFBundleVersion>` of the tested app, e.g. `0.0.1-1`. `linux-cloud-session` marks runs with no app. |
-| OS | `macos-<productVersion>-<buildVersion>`, e.g. `macos-26.1-<build>`. Off macOS: `linux-<id>-<version>`. |
-| TEST_ID | `G0-ENV`, `G0-SIGN`, `G0-EXT-ACTIVATE`, `G0-MOUNT`, `G0-LIST`, `G0-READ-RANGE`, `G0-EOF`, `G0-CANCEL`, `G0-READONLY`, `G0-IPC-AUTH`, `G0-SERVICE-RESTART`, `G0-UNMOUNT`. Later gates use `G1-…` or test-plan IDs `T01…T16`. |
+| BUILD | App version and build, e.g. `0.1.0-12`. Same on Mac and Windows for one pipeline run. |
+| OS | `macos-<productVersion>-<buildVersion>` (e.g. `macos-15.1-24B83`), `windows-<version>-<build>` (e.g. `windows-11-26100`), `ios-<version>`, `android-<version>` |
+| TEST_ID | `SD-AT01` … `SD-AT15` from doc 14. A test run on Mac and Windows gets one directory per OS. |
 
 ## result.json
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `pass`, `fail` or `blocked`. Blocked means the test could not run. It never counts as pass. |
+| `testId`, `gate`, `title` | e.g. `SD-AT05`, `SD`, "Phone upload appears" |
+| `requirements` | SD-FR IDs the test covers (doc 14 traceability table) |
+| `status` | `pass`, `fail` or `blocked`. Blocked means it could not run. It never counts as pass. |
 | `reason` | Required for `fail` and `blocked` |
-| `expected` / `observed` | Pass criterion as text / raw observed values (`null` when nothing could be observed) |
-| `command` | Reproducible command, or manual procedure |
-| `build`, `os`, `startedAt`, `finishedAt`, `exitCode` | Reproducibility (NFR10) |
-| `artifacts`, `fixtureManifest` | Files next to `result.json`, as relative paths |
-| `g0Verify` | Platform assumptions this test has to confirm |
+| `expected` / `observed` | Pass criterion / what actually happened (`null` if nothing could be observed) |
+| `command` | Command or manual steps, enough to repeat |
+| `build`, `os`, `startedAt`, `finishedAt` | Reproducibility |
+| `artifacts` | Files next to `result.json`, as relative paths |
+| `recordedBy` | Who ran a manual test |
+
+Example:
+
+```json
+{
+  "schemaVersion": 1, "testId": "SD-AT05", "gate": "SD", "title": "Phone upload appears",
+  "requirements": ["SD-FR10"], "status": "pass", "reason": null,
+  "expected": "Photo uploaded from iPhone visible in Finder within 60 s",
+  "observed": { "secondsToVisible": 34 },
+  "command": "Manual: upload IMG_0001.jpg with Drive app on iPhone, start stopwatch at 'Upload complete', stop when it appears in Finder",
+  "build": { "id": "0.1.0-12" }, "os": { "id": "macos-15.1-24B83" },
+  "startedAt": "2026-12-01T10:00:00Z", "finishedAt": "2026-12-01T10:01:00Z",
+  "recordedBy": "tester-a"
+}
+```
 
 To validate every result:
 
@@ -53,7 +66,7 @@ EOF
 
 ## Rules
 
-- Commit evidence; never commit DMGs, apps, certificates, keys or tokens.
-- Logs are redacted automatically: `$HOME` paths, user names, e-mail addresses, bearer tokens, key-value secrets, long hex/base64 strings and certificate holder names. Review them anyway before committing.
-- Do not edit a machine-written `result.json` to change its status. Rerun the test, or add a manual result with `recordedBy` set to the person and the procedure in `command`.
-- `linux-cloud-session/linux-ubuntu-24.04/` holds the honest record from the Linux cloud session. Every G0 test there is blocked. Its `fixture-manifest.json` files are real `fixture-check manifest` output.
+- Commit evidence; never commit apps, DMGs, installers, certificates, keys or tokens.
+- Redact logs before committing: home paths, e-mail addresses, tokens, upload URLs. Use test files, not personal ones.
+- Do not edit a `result.json` to change its status. Rerun the test and record the new result.
+- A Linux cloud session cannot run any SD-AT test. Do not record them there as pass.
