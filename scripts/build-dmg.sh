@@ -565,6 +565,13 @@ inspect_targets() {
     if [[ -n "$EXT_RESTRICTED" && -z "${MACOS_PROFILE_EXT_BASE64:-}" ]]; then
       die "$EXT_TARGET claims restricted entitlements ($EXT_RESTRICTED), so a Developer ID build needs MACOS_PROFILE_EXT_BASE64 (Developer ID profile for $EXT_BUNDLE_ID). See docs/12-pipeline-usage.md, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
     fi
+    # The app and the File Provider extension share the Google sign-in through
+    # the data-protection keychain, which needs the application-identifier
+    # that only a provisioning profile grants (TN3137). Without both profiles
+    # a "signed" build installs fine but the Finder location never signs in.
+    if [[ -z "${MACOS_PROFILE_APP_BASE64:-}" || -z "${MACOS_PROFILE_EXT_BASE64:-}" ]]; then
+      die "Signed builds need both MACOS_PROFILE_APP_BASE64 and MACOS_PROFILE_EXT_BASE64 (Developer ID profiles with App Groups for $APP_BUNDLE_ID and $EXT_BUNDLE_ID): the app and extension share sign-in through the keychain, which needs them. See docs/12-pipeline-usage.md, or remove MACOS_CERT_P12_BASE64 for an unsigned build."
+    fi
   elif [[ -n "$APP_RESTRICTED$EXT_RESTRICTED" ]]; then
     warn "Unsigned build: restricted entitlements (${APP_RESTRICTED:+app: $APP_RESTRICTED; }${EXT_RESTRICTED:+extension: $EXT_RESTRICTED}) cannot be authorised without a profile, so the ad-hoc signature leaves them out (macOS would refuse to launch the app otherwise). Keychain sharing between app and extension will not work in this build."
   fi

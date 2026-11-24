@@ -116,8 +116,8 @@ gh variable set DRIVE_ROOT_SHARED_DRIVE_NAME --body "WakeupMonster"
 | `MACOS_CERT_PASSWORD` | Mac | Password of the `.p12` | Signing |
 | `APPLE_TEAM_ID` | Mac | 10-character team ID | Signing (required if the `.p12` is set) |
 | `KEYCHAIN_PASSWORD` | Mac | Any long random string for the temporary keychain; generated if missing | Signing (optional) |
-| `MACOS_PROFILE_APP_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev`, base64 | Signing, if `DriveApp` claims a restricted entitlement (§2.3) |
-| `MACOS_PROFILE_EXT_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev.fileprovider`, base64 | Signing, if `DriveAppFileProvider` claims a restricted entitlement (§2.3) |
+| `MACOS_PROFILE_APP_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev`, base64 | **Required for signed builds** (shared keychain sign-in needs it, TN3137) |
+| `MACOS_PROFILE_EXT_BASE64` | Mac | Developer ID provisioning profile for `com.wakeupmonster.driveapp.dev.fileprovider`, base64 | **Required for signed builds** (shared keychain sign-in needs it, TN3137) |
 | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8_BASE64` | Mac | App Store Connect API key (Developer role); the `.p8` base64 | Notarisation |
 | `WINDOWS_CERT_PFX_BASE64` | Windows | Code-signing certificate with private key (`.pfx`), base64 | Authenticode signing (turns it on) |
 | `WINDOWS_CERT_PASSWORD` | Windows | Password of the `.pfx` | Authenticode signing |
