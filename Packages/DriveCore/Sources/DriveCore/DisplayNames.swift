@@ -53,9 +53,21 @@ public enum DisplayNames {
         return (String(view[..<dot]), String(view[dot...]))
     }
 
-    /// Collision key: sanitized and lower-cased. Compared by Unicode scalars (ordinal), not canonical equivalence.
+    /// Collision key: sanitized and lower-cased, compared by Unicode scalars (ordinal), not canonical equivalence.
+    ///
+    /// Lower-casing is per scalar like `lowercased()`, except U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) is kept:
+    /// .NET `ToLowerInvariant()` leaves it unchanged while Swift's full mapping yields "i" + U+0307. That is the only
+    /// unconditional multi-scalar lowercase mapping in Unicode, so with this exception both platforms agree.
     static func key(_ name: String) -> [Unicode.Scalar] {
-        Array(sanitize(name).lowercased().unicodeScalars)
+        var out: [Unicode.Scalar] = []
+        for u in sanitize(name).unicodeScalars {
+            if u.value == 0x130 {
+                out.append(u)
+            } else {
+                out.append(contentsOf: u.properties.lowercaseMapping.unicodeScalars)
+            }
+        }
+        return out
     }
 
     /// Visible children of ONE folder → display name per file ID. Hidden items are dropped.

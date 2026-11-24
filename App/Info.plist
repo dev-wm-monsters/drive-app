@@ -20,12 +20,16 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>DriveAppBaseBundleID</key>
-	<string>$(APP_BUNDLE_ID)</string>
-	<key>DriveAppStorageMachService</key>
-	<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID).storage</string>
-	<key>DriveAppTeamID</key>
-	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>DriveAppGroup</key>
+	<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID)</string>
+	<key>DriveRootFolderID</key>
+	<string>$(DRIVE_ROOT_FOLDER_ID)</string>
+	<key>DriveRootSharedDriveName</key>
+	<string>$(DRIVE_ROOT_SHARED_DRIVE_NAME)</string>
+	<key>GoogleClientID</key>
+	<string>$(GOOGLE_CLIENT_ID_MAC)</string>
+	<key>GoogleReversedClientID</key>
+	<string>$(GOOGLE_REVERSED_CLIENT_ID)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>

@@ -1,5 +1,5 @@
 {
-  "description": "Shared test vectors for display-name disambiguation. Swift (Packages/DriveCore) and C# (windows/) tests MUST both pass these. Algorithm: docs/14-shared-drive-sync.md.",
+  "description": "Shared test vectors for display-name disambiguation. Swift (Packages/DriveCore) and C# (windows/) tests MUST both pass these. Algorithm: docs/14-shared-drive-sync.md. Compare strings by code points (no canonical-equivalence comparison). key() lower-casing = .NET ToLowerInvariant (Unicode simple mapping, U+0130 unchanged); Swift uses lowercaseMapping per scalar except U+0130. \"note\" fields are informational.",
   "sanitize": [
     { "in": "clip.mp4", "out": "clip.mp4" },
     { "in": "Q1: plan?.mov", "out": "Q1_ plan_.mov" },
@@ -12,7 +12,14 @@
     { "in": "console.txt", "out": "console.txt" },
     { "in": ".hidden", "out": ".hidden" },
     { "in": "tab\there", "out": "tab_here" },
-    { "in": "Café.mov", "out": "Café.mov" }
+    { "in": "Café.mov", "out": "Café.mov" },
+    { "in": "COM1.tar.gz", "out": "COM1_.tar.gz" },
+    { "in": "nul.", "out": "nul_", "note": "trim first, then the reserved-name check" },
+    { "in": "COM10.txt", "out": "COM10.txt" },
+    { "in": "aux .txt", "out": "aux .txt", "note": "the part before the first dot is 'aux ' (with space): not reserved" },
+    { "in": "a\u007fb", "out": "a_b" },
+    { "in": "name . .", "out": "name" },
+    { "in": "  lead", "out": "  lead", "note": "leading spaces are kept" }
   ],
   "assign": [
     {
@@ -75,11 +82,41 @@
         { "id": "2", "name": "a_b.txt", "mimeType": "text/plain", "createdTime": "2026-01-02T00:00:00Z" }
       ],
       "expected": { "1": "a_b.txt", "2": "a_b (2).txt" }
+    },
+    {
+      "name": "equal createdTime: id ordinal (UTF-16 code unit) order, uppercase before lowercase",
+      "children": [
+        { "id": "a", "name": "x.txt", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "B", "name": "x.txt", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" }
+      ],
+      "expected": { "B": "x.txt", "a": "x (2).txt" }
+    },
+    {
+      "name": "fractional-second createdTime ordering",
+      "children": [
+        { "id": "1", "name": "p.jpg", "mimeType": "image/jpeg", "createdTime": "2026-01-01T00:00:00.500Z" },
+        { "id": "2", "name": "p.jpg", "mimeType": "image/jpeg", "createdTime": "2026-01-01T00:00:00.250Z" }
+      ],
+      "expected": { "2": "p.jpg", "1": "p (2).jpg" }
+    },
+    {
+      "name": "key lower-casing matches .NET ToLowerInvariant: U+0130 stays U+0130 (not i + U+0307)",
+      "children": [
+        { "id": "1", "name": "\u0130.txt", "mimeType": "text/plain", "createdTime": "2026-01-01T00:00:00Z" },
+        { "id": "2", "name": "i\u0307.txt", "mimeType": "text/plain", "createdTime": "2026-01-02T00:00:00Z" },
+        { "id": "3", "name": "\u0131.txt", "mimeType": "text/plain", "createdTime": "2026-01-03T00:00:00Z" },
+        { "id": "4", "name": "\u039a.txt", "mimeType": "text/plain", "createdTime": "2026-01-04T00:00:00Z" },
+        { "id": "5", "name": "\u03ba.txt", "mimeType": "text/plain", "createdTime": "2026-01-05T00:00:00Z" }
+      ],
+      "expected": { "1": "\u0130.txt", "2": "i\u0307.txt", "3": "\u0131.txt", "4": "\u039a.txt", "5": "\u03ba (2).txt" }
     }
   ],
   "uniqueUploadName": [
     { "desired": "v.mp4", "existing": [], "out": "v.mp4" },
     { "desired": "v.mp4", "existing": ["v.mp4", "V (2).mp4"], "out": "v (3).mp4" },
-    { "desired": "x?.mov", "existing": ["x_.mov"], "out": "x_ (2).mov" }
+    { "desired": "x?.mov", "existing": ["x_.mov"], "out": "x_ (2).mov" },
+    { "desired": "aux.mp4", "existing": ["AUX_.mp4"], "out": "aux_ (2).mp4" },
+    { "desired": ".bashrc", "existing": [".BASHRC"], "out": ".bashrc (2)" },
+    { "desired": "clip.mp4", "existing": ["clip.mp4", "clip (2).mp4", "Clip (3).MP4"], "out": "clip (4).mp4" }
   ]
 }

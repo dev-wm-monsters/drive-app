@@ -124,9 +124,10 @@ struct APIFile: Decodable {
 
     func toDriveFile() throws(DriveError) -> DriveFile {
         guard let name, let mimeType else { throw .invalidResponse("file \(id) lacks name/mimeType") }
-        let created = try createdTime.map { (s) throws(DriveError) -> Date in try RFC3339.parseOrThrow(s) }
-            ?? Date(timeIntervalSince1970: 0)
-        let modified = try modifiedTime.map { (s) throws(DriveError) -> Date in try RFC3339.parseOrThrow(s) } ?? created
+        var created = Date(timeIntervalSince1970: 0)
+        if let createdTime { created = try RFC3339.parseOrThrow(createdTime) }
+        var modified = created
+        if let modifiedTime { modified = try RFC3339.parseOrThrow(modifiedTime) }
         return DriveFile(
             id: id,
             name: name,

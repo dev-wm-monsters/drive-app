@@ -209,13 +209,17 @@ public struct OAuthClient: Sendable {
 enum FormEncoding {
     static let unreserved: Set<UInt8> = Set(Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~".utf8))
 
+    static let hexDigits = Array("0123456789ABCDEF".utf8)
+
     static func escape(_ s: String) -> String {
         var out = ""
         for b in s.utf8 {
             if unreserved.contains(b) {
                 out.unicodeScalars.append(Unicode.Scalar(b))
             } else {
-                out += String(format: "%%%02X", b)
+                out += "%"
+                out.unicodeScalars.append(Unicode.Scalar(hexDigits[Int(b >> 4)]))
+                out.unicodeScalars.append(Unicode.Scalar(hexDigits[Int(b & 0x0f)]))
             }
         }
         return out

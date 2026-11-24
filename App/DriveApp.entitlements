@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  DriveApp (host app) entitlements. Placeholder for the DMG pipeline.
-  App Sandbox on. No hardened-runtime exceptions (com.apple.security.cs.*),
-  so the app passes notarisation as is.
-  B01: App Group membership lets the sandboxed app look up the StorageService
-  Mach service, whose name is prefixed by this group (ADR03, G0-VERIFY).
+  DriveApp (menu-bar host app) entitlements.
+  - App Sandbox.
+  - App Group $(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID): shared with the File
+    Provider extension (UserDefaults suite, item index, and the keychain
+    access group used by KeychainTokenStore).
+  - network.client: Google OAuth + Drive API (sign-in, root lookup, uploads).
+  - files.user-selected.read-only: read files picked in "Upload Files…".
+  No hardened-runtime exceptions (com.apple.security.cs.*).
+  No keychain-access-groups: the App Group doubles as the keychain access
+  group (VERIFY-ON-MAC, see App/Shared/KeychainTokenStore.swift).
 -->
 <plist version="1.0">
 <dict>
@@ -15,5 +20,9 @@
 	<array>
 		<string>$(DEVELOPMENT_TEAM).$(APP_BUNDLE_ID)</string>
 	</array>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>
