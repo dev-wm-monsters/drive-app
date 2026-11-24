@@ -11,8 +11,8 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
-    <!-- CA1848: LoggerMessage source-gen is not worth it for a tray app that logs a few lines a minute. -->
-    <NoWarn>$(NoWarn);CA1848</NoWarn>
+    <!-- CA1848/CA1873: LoggerMessage source-gen is not worth it for a tray app that logs a few lines a minute. -->
+    <NoWarn>$(NoWarn);CA1848;CA1873</NoWarn>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- Lets the Windows-only projects build on Linux/macOS CI (no native code runs). -->

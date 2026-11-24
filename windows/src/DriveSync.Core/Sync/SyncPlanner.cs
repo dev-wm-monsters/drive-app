@@ -151,6 +151,10 @@ public static class SyncPlanner
             else
             {
                 parentId = view.TryGet(parentPath, out var p) && p.IsDirectory && p.IsPlaceholder ? p.FileId : null;
+                if (parentId is not null && !(remote.TryGet(parentId, out var parentItem) && parentItem.IsFolder))
+                {
+                    continue; // folder was removed from Drive (kept locally only to protect this file)
+                }
             }
 
             if (parentId is null)
