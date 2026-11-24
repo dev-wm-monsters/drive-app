@@ -49,9 +49,53 @@ final class DriveClientTests: XCTestCase {
                        .json(200, fileJSON(id: "rootF", name: "Shared", mimeType: DriveFile.folderMimeType, parents: ["x"])))
         let root = try await h.client.resolveRoot()
         XCTAssertEqual(root, DriveRoot(id: "rootF", name: "Shared", driveID: nil))
+        XCTAssertTrue(root.isFolderMode)
         let q = query(h.transport.requests[0])
         XCTAssertEqual(q["supportsAllDrives"], "true")
-        XCTAssertEqual(q["fields"], DriveClient.fields)
+        XCTAssertEqual(q["fields"], DriveClient.fields + ",driveId")
+    }
+
+    func testResolveRootFolderInsideSharedDrive() async throws {
+        let h = Harness(root: .folderID("rootF"))
+        h.transport.on(path("/drive/v3/files/rootF"),
+                       .json(200, fileJSON(id: "rootF", name: "Shared", mimeType: DriveFile.folderMimeType,
+                                           parents: ["sd1"], extra: #""driveId":"sd1""#)))
+        let root = try await h.client.resolveRoot()
+        XCTAssertEqual(root, DriveRoot(id: "rootF", name: "Shared", driveID: "sd1"))
+        XCTAssertTrue(root.isFolderMode)
+        XCTAssertFalse(sharedRoot.isFolderMode)
+        // A shared drive's own root folder given as the folder ID is plain shared-drive mode.
+        XCTAssertFalse(DriveRoot(id: "sd1", name: "D", driveID: "sd1").isFolderMode)
+    }
+
+    func testFolderInsideSharedDriveScopesListAndChangesAndFilters() async throws {
+        let h = Harness(root: .folderID("rootF"))
+        let root = DriveRoot(id: "rootF", name: "Shared", driveID: "sd1")
+        h.transport.on(path("/drive/v3/files"),
+                       .json(200, """
+                       {"files":[\(fileJSON(id: "sub", name: "Sub", mimeType: DriveFile.folderMimeType, parents: ["rootF"]))]}
+                       """))
+        _ = try await h.client.listChildren(of: "rootF", root: root)
+        let lq = query(h.transport.requests[0])
+        XCTAssertEqual(lq["corpora"], "drive")
+        XCTAssertEqual(lq["driveId"], "sd1")
+        h.transport.on(path("/drive/v3/changes/startPageToken"), .json(200, #"{"startPageToken":"s"}"#))
+        _ = try await h.client.startPageToken(root: root)
+        XCTAssertEqual(query(h.transport.requests[1])["driveId"], "sd1")
+        h.transport.on(path("/drive/v3/changes"),
+                       .json(200, """
+                       {"newStartPageToken":"n","changes":[
+                         {"fileId":"elsewhere","file":\(fileJSON(id: "elsewhere", name: "e.mp4", parents: ["sd1"]))},
+                         {"fileId":"in","file":\(fileJSON(id: "in", name: "i.mp4", parents: ["sub"]))}
+                       ]}
+                       """))
+        let batch = try await h.client.changes(since: "s", root: root)
+        XCTAssertEqual(batch.changes.map { if case .upsert(let f) = $0 { return f.id } else { return "-" } }, ["in"])
+        let cq = query(h.transport.requests[2])
+        XCTAssertEqual(cq["driveId"], "sd1")
+        XCTAssertEqual(cq["includeItemsFromAllDrives"], "true")
+        let snapshot = await h.client.folderIndexSnapshot()
+        XCTAssertEqual(snapshot?.folderIDs, ["rootF", "sub"])
     }
 
     func testResolveRootFolderModeErrors() async {

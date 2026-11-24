@@ -69,8 +69,14 @@ public struct DriveRoot: Sendable, Hashable, Codable {
     /// Folder ID of the root (for a shared drive this equals the drive ID).
     public var id: String
     public var name: String
-    /// Non-nil in shared-drive mode; nil in folder mode.
+    /// The shared drive holding the root: equal to `id` in shared-drive mode, the containing drive for a folder
+    /// inside a shared drive (folder mode), nil for a folder in My Drive (folder mode). When non-nil, list and
+    /// changes calls are scoped with `corpora=drive&driveId=` / `driveId=`.
     public var driveID: String?
+
+    /// True when the root is a folder (not a whole shared drive): changes are then filtered to its subtree with
+    /// `FolderIndex`.
+    public var isFolderMode: Bool { driveID == nil || driveID != id }
 
     public init(id: String, name: String, driveID: String?) {
         self.id = id
@@ -121,6 +127,8 @@ struct APIFile: Decodable {
     var videoMediaMetadata: Video?
     var imageMediaMetadata: Image?
     var capabilities: Caps?
+    /// Only requested by `resolveRoot` (folder mode): the shared drive holding the file, absent in My Drive.
+    var driveId: String?
 
     func toDriveFile() throws(DriveError) -> DriveFile {
         // No file ID in the message: DriveError descriptions are logged at public level.

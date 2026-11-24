@@ -15,7 +15,8 @@ import Musl
 /// - Every call sends `supportsAllDrives=true`; list/changes also `includeItemsFromAllDrives=true`;
 ///   shared-drive mode adds `corpora=drive&driveId=` (list) / `driveId=` (changes).
 /// - Retries per `RetryPolicy`; a 401 forces one token refresh and one retry, then `.needsLogin`.
-/// - Folder mode (`DriveRoot.driveID == nil`): keeps a `FolderIndex`, filled by `listChildren` (each listed folder
+/// - Folder mode (`DriveRoot.isFolderMode`; the folder may sit in My Drive or inside a shared drive, in which case
+///   `driveID` is that drive and list/changes are scoped to it): keeps a `FolderIndex`, filled by `listChildren` (each listed folder
 ///   and every visible child) and by `changes`, to filter the account-wide changes feed down to the root's tree.
 /// - Never logs anything; error payloads never contain tokens or upload session URLs.
 public actor DriveClient {
@@ -86,16 +87,24 @@ public actor DriveClient {
             root = DriveRoot(id: drive.id, name: drive.name, driveID: drive.id)
 
         case .folderID(let id):
+            // driveId: a folder inside a shared drive must be listed and polled with corpora=drive&driveId=, or
+            // changes.list omits the shared drive's items. Absent for a folder in My Drive.
             let f: DriveFile
+            let containingDrive: String?
             do {
-                f = try await file(id: id)
+                let api: APIFile = try await getJSON(Self.apiURL(
+                    "files/\(FormEncoding.escape(id))",
+                    [("fields", Self.fields + ",driveId"), ("supportsAllDrives", "true")]
+                ))
+                f = try api.toDriveFile()
+                containingDrive = api.driveId.flatMap { $0.isEmpty ? nil : $0 }
             } catch {
                 let e = mapTransportError(error) // explicit: do-catch type inference varies across Swift 6.x
                 if e == .notFound { throw .rootNotFound(id) }
                 throw e
             }
             guard f.isFolder, !f.trashed else { throw .rootNotFound(id) }
-            root = DriveRoot(id: f.id, name: f.name, driveID: nil)
+            root = DriveRoot(id: f.id, name: f.name, driveID: containingDrive)
         }
         remember(root)
         return root
@@ -112,7 +121,7 @@ public actor DriveClient {
             fields: "nextPageToken,files(\(Self.fields))"
         )
         let visible = all.filter { !$0.isHidden }
-        if root.driveID == nil, var index = folderIndex, index.rootID == root.id {
+        if root.isFolderMode, var index = folderIndex, index.rootID == root.id {
             index.insert(folderID: folderID)
             for f in visible {
                 if f.isFolder { index.insert(folderID: f.id) } else { index.insert(fileID: f.id) }
@@ -242,7 +251,7 @@ public actor DriveClient {
                 continue
             }
             let f = try apiFile.toDriveFile()
-            guard root.driveID == nil, var idx = index else {
+            guard root.isFolderMode, var idx = index else {
                 out.append(f.isHidden ? .removed(fileID: f.id) : .upsert(f))
                 continue
             }
@@ -530,7 +539,7 @@ public actor DriveClient {
 
     private func remember(_ root: DriveRoot) {
         currentRoot = root
-        if root.driveID == nil {
+        if root.isFolderMode {
             if folderIndex?.rootID != root.id { folderIndex = FolderIndex(rootID: root.id) }
         } else {
             folderIndex = nil

@@ -32,7 +32,7 @@ final class ProviderCore: Sendable {
     func root() async throws(DriveError) -> DriveRoot {
         let root = try await services.root()
         await index.ensureRoot(root.id)
-        if root.driveID == nil, await folderIndexRestore.claim(), var saved = await index.folderIndex(forRoot: root.id) {
+        if root.isFolderMode, await folderIndexRestore.claim(), var saved = await index.folderIndex(forRoot: root.id) {
             // Folder mode: DriveClient filters changes with its FolderIndex,
             // which starts empty in a new process. Re-seed it, keeping
             // anything a concurrent call already added.
@@ -47,7 +47,7 @@ final class ProviderCore: Sendable {
 
     /// Persists the item index (and, in folder mode, DriveClient's FolderIndex).
     func saveIndex(root: DriveRoot) async {
-        if root.driveID == nil, let snapshot = await client.folderIndexSnapshot() {
+        if root.isFolderMode, let snapshot = await client.folderIndexSnapshot() {
             await index.setFolderIndex(snapshot)
         }
         await index.save()

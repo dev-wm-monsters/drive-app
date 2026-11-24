@@ -41,7 +41,10 @@ The API is fixed by Contract v2 ("DriveCore public API"). Shared rules: `docs/14
   when `Content-Range` shows end of file. Extra bytes are trimmed. `416` → empty data.
 - **changes.** Returns one page. The caller loops on `nextPageToken` and stores `newStartPageToken`. A change that is removed,
   trashed or hidden → `.removed(fileID:)`.
-  - **Folder mode.** The feed covers the whole account, so `DriveClient` keeps a `FolderIndex`. It is filled from `listChildren`
+  - **Folder mode.** `resolveRoot` reads the folder's `driveId`. A folder inside a shared drive gets `DriveRoot.driveID` = that
+    drive, so list and changes calls are scoped with `corpora=drive&driveId=` / `driveId=` (without it `changes.list` omits
+    shared-drive items); a folder in My Drive has `driveID == nil` and the feed covers the whole account. In both cases
+    (`DriveRoot.isFolderMode`) the feed is wider than the folder, so `DriveClient` keeps a `FolderIndex`. It is filled from `listChildren`
     (the listed folder and every visible child) and from processed changes. A change is kept if its parents include a known
     folder or its ID is already known. A known item whose parents leave the tree is reported as removed.
   - **Folder mode, `removed: true`.** These entries carry no parents, so they are always reported.
